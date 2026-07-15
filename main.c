@@ -879,6 +879,11 @@ static void wheel_logical_point(LPARAM lParam, int *x, int *y) {
     *y = MulDiv(point.y, 96, g_app.dpi);
 }
 
+static int direct_gesture_delta(WPARAM wParam) {
+    /* Treat touchpad scrolling as direct manipulation: up/right increases. */
+    return -GET_WHEEL_DELTA_WPARAM(wParam);
+}
+
 static int step_hovered_slider(WheelTargetKind kind, int x, int y, int delta) {
     ControlId slider = slider_at_point(x, y);
     if (slider == CONTROL_NONE) return 0;
@@ -1124,7 +1129,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         int x;
         int y;
         wheel_logical_point(lParam, &x, &y);
-        int delta = -GET_WHEEL_DELTA_WPARAM(wParam);
+        int delta = direct_gesture_delta(wParam);
 
         if (step_hovered_slider(WHEEL_TARGET_SLIDER, x, y, delta)) return 0;
 
@@ -1147,7 +1152,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         int x;
         int y;
         wheel_logical_point(lParam, &x, &y);
-        step_hovered_slider(WHEEL_TARGET_SLIDER_HORIZONTAL, x, y, -GET_WHEEL_DELTA_WPARAM(wParam));
+        step_hovered_slider(WHEEL_TARGET_SLIDER_HORIZONTAL, x, y, direct_gesture_delta(wParam));
         return 0;
     }
     case WM_SETCURSOR: {
