@@ -94,4 +94,8 @@ static int bellwin_step_time_segment(int minuteOfDay, BellwinTimeSegment segment
     return hours * 60 + minutes;
 }
 
+static int bellwin_pause_is_active(uint64_t nowTick, uint64_t pauseUntilTick, int pauseIndefinitely) {
+    return pauseIndefinitely || (pauseUntilTick != 0 && nowTick < pauseUntilTick);
+}
+
 #endif

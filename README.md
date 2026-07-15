@@ -10,6 +10,11 @@ Focused sliders use the left/right arrows, the switch and install button use
 changed with the up/down arrows. Sliders and individual time pairs also react
 to the mouse wheel while hovered.
 
+Left-clicking the tray icon opens Settings. Its context menu can ring the bell
+immediately, pause ringing for 30 minutes, 1 hour, or 2 hours, toggle an
+indefinite pause, or exit the application. After a timed or indefinite pause
+ends, Bellwin starts a fresh random interval before the next bell.
+
 ## Build
 
 The project follows the single-command native build used by

@@ -24,7 +24,11 @@
 #define WM_SHOW_BELLWIN (WM_APP + 2)
 #define CMD_TRAY_SHOW 1001
 #define CMD_TRAY_RING 1002
-#define CMD_TRAY_EXIT 1003
+#define CMD_TRAY_PAUSE_30_MINUTES 1003
+#define CMD_TRAY_PAUSE_1_HOUR 1004
+#define CMD_TRAY_PAUSE_2_HOURS 1005
+#define CMD_TRAY_PAUSE_INDEFINITELY 1006
+#define CMD_TRAY_EXIT 1007
 
 typedef BOOL (WINAPI *SetProcessDpiAwarenessContextFn)(HANDLE);
 typedef UINT (WINAPI *GetDpiForWindowFn)(HWND);
@@ -103,6 +107,9 @@ typedef struct AppState {
     int updateAvailable;
     int exiting;
     ULONGLONG nextBellTick;
+    ULONGLONG pauseUntilTick;
+    int pauseIndefinitely;
+    int timedPauseMinutes;
     wchar_t appDataDirectory[MAX_PATH];
     wchar_t settingsPath[MAX_PATH];
     wchar_t soundPath[MAX_PATH];
@@ -111,6 +118,8 @@ typedef struct AppState {
 
 static AppState g_app;
 static UINT g_taskbarCreated;
+
+static void update_tray_tip(void);
 
 static int px(int logical) {
     return MulDiv(logical, g_app.dpi, 96);
@@ -269,6 +278,25 @@ static void schedule_next_bell(void) {
         g_app.settings.quietEndMinutes
     );
     g_app.nextBellTick = GetTickCount64() + (ULONGLONG)(delay + quietWait) * 60ULL * 1000ULL;
+}
+
+static void pause_for_minutes(int minutes) {
+    g_app.pauseIndefinitely = 0;
+    g_app.timedPauseMinutes = minutes;
+    g_app.pauseUntilTick = GetTickCount64() + (ULONGLONG)minutes * 60ULL * 1000ULL;
+    update_tray_tip();
+}
+
+static void toggle_indefinite_pause(void) {
+    if (g_app.pauseIndefinitely) {
+        g_app.pauseIndefinitely = 0;
+        schedule_next_bell();
+    } else {
+        g_app.pauseIndefinitely = 1;
+        g_app.pauseUntilTick = 0;
+        g_app.timedPauseMinutes = 0;
+    }
+    update_tray_tip();
 }
 
 static int is_autostart_enabled(void) {
@@ -870,10 +898,24 @@ static void add_tray_icon(void) {
     g_app.tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_app.tray.uCallbackMessage = WM_TRAY;
     g_app.tray.hIcon = g_app.smallIcon;
-    wcscpy_s(g_app.tray.szTip, sizeof(g_app.tray.szTip) / sizeof(g_app.tray.szTip[0]), L"Bellwin — mindfulness bell");
+    wcscpy_s(g_app.tray.szTip, sizeof(g_app.tray.szTip) / sizeof(g_app.tray.szTip[0]),
+        bellwin_pause_is_active(GetTickCount64(), g_app.pauseUntilTick, g_app.pauseIndefinitely)
+            ? L"Bellwin — paused"
+            : L"Bellwin — mindfulness bell");
     Shell_NotifyIconW(NIM_ADD, &g_app.tray);
     g_app.tray.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &g_app.tray);
+}
+
+static void update_tray_tip(void) {
+    if (!g_app.tray.cbSize) return;
+    NOTIFYICONDATAW update = g_app.tray;
+    update.uFlags = NIF_TIP;
+    wcscpy_s(update.szTip, sizeof(update.szTip) / sizeof(update.szTip[0]),
+        bellwin_pause_is_active(GetTickCount64(), g_app.pauseUntilTick, g_app.pauseIndefinitely)
+            ? L"Bellwin — paused"
+            : L"Bellwin — mindfulness bell");
+    Shell_NotifyIconW(NIM_MODIFY, &update);
 }
 
 static void remove_tray_icon(void) {
@@ -891,12 +933,39 @@ static void show_tray_menu(void) {
     POINT point;
     GetCursorPos(&point);
     HMENU menu = CreatePopupMenu();
+    HMENU pauseMenu = CreatePopupMenu();
+    if (!menu || !pauseMenu) {
+        if (pauseMenu) DestroyMenu(pauseMenu);
+        if (menu) DestroyMenu(menu);
+        return;
+    }
+
+    ULONGLONG now = GetTickCount64();
+    int timedPauseActive = g_app.pauseUntilTick != 0
+        && bellwin_pause_is_active(now, g_app.pauseUntilTick, 0);
+    AppendMenuW(pauseMenu,
+        MF_STRING | (timedPauseActive && g_app.timedPauseMinutes == 30 ? MF_CHECKED : MF_UNCHECKED),
+        CMD_TRAY_PAUSE_30_MINUTES, L"30 minutes");
+    AppendMenuW(pauseMenu,
+        MF_STRING | (timedPauseActive && g_app.timedPauseMinutes == 60 ? MF_CHECKED : MF_UNCHECKED),
+        CMD_TRAY_PAUSE_1_HOUR, L"1 hour");
+    AppendMenuW(pauseMenu,
+        MF_STRING | (timedPauseActive && g_app.timedPauseMinutes == 120 ? MF_CHECKED : MF_UNCHECKED),
+        CMD_TRAY_PAUSE_2_HOURS, L"2 hours");
+
     AppendMenuW(menu, MF_STRING, CMD_TRAY_SHOW, L"Settings");
     AppendMenuW(menu, MF_STRING, CMD_TRAY_RING, L"Ring now");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)pauseMenu, L"Pause for");
+    AppendMenuW(menu,
+        MF_STRING | (g_app.pauseIndefinitely ? MF_CHECKED : MF_UNCHECKED),
+        CMD_TRAY_PAUSE_INDEFINITELY, L"Pause indefinitely");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, CMD_TRAY_EXIT, L"Exit");
+    SetMenuDefaultItem(menu, CMD_TRAY_SHOW, FALSE);
     SetForegroundWindow(g_app.window);
     TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN, point.x, point.y, 0, g_app.window, NULL);
+    PostMessageW(g_app.window, WM_NULL, 0, 0);
     DestroyMenu(menu);
 }
 
@@ -1045,17 +1114,34 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         break;
     }
     case WM_TIMER:
-        if (wParam == TIMER_SCHEDULE && GetTickCount64() >= g_app.nextBellTick) {
+        if (wParam == TIMER_SCHEDULE) {
+            ULONGLONG now = GetTickCount64();
+            if (g_app.pauseIndefinitely) return 0;
+            if (g_app.pauseUntilTick) {
+                if (bellwin_pause_is_active(now, g_app.pauseUntilTick, 0)) return 0;
+                g_app.pauseUntilTick = 0;
+                g_app.timedPauseMinutes = 0;
+                update_tray_tip();
+                schedule_next_bell();
+                return 0;
+            }
+            if (now < g_app.nextBellTick) return 0;
             if (!bellwin_is_quiet(current_minute_of_day(), g_app.settings.quietStartMinutes, g_app.settings.quietEndMinutes)) {
                 play_bell();
             }
             schedule_next_bell();
         }
         return 0;
-    case WM_TRAY:
-        if (lParam == WM_LBUTTONDBLCLK) show_window();
-        else if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) show_tray_menu();
+    case WM_TRAY: {
+        UINT trayEvent = LOWORD(lParam);
+        if (trayEvent == WM_LBUTTONUP || trayEvent == WM_LBUTTONDBLCLK
+            || trayEvent == NIN_SELECT || trayEvent == NIN_KEYSELECT) {
+            show_window();
+        } else if (trayEvent == WM_RBUTTONUP || trayEvent == WM_CONTEXTMENU) {
+            show_tray_menu();
+        }
         return 0;
+    }
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case CMD_TRAY_SHOW:
@@ -1064,6 +1150,18 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         case CMD_TRAY_RING:
             play_bell();
             schedule_next_bell();
+            return 0;
+        case CMD_TRAY_PAUSE_30_MINUTES:
+            pause_for_minutes(30);
+            return 0;
+        case CMD_TRAY_PAUSE_1_HOUR:
+            pause_for_minutes(60);
+            return 0;
+        case CMD_TRAY_PAUSE_2_HOURS:
+            pause_for_minutes(120);
+            return 0;
+        case CMD_TRAY_PAUSE_INDEFINITELY:
+            toggle_indefinite_pause();
             return 0;
         case CMD_TRAY_EXIT:
             g_app.exiting = 1;

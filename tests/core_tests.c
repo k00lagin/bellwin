@@ -56,6 +56,15 @@ static void test_time_segment_stepping_wraps_only_selected_pair(void) {
     assert(bellwin_step_time_segment(9 * 60, BELLWIN_TIME_MINUTES, -1) == 9 * 60 + 59);
 }
 
+static void test_pause_state(void) {
+    assert(!bellwin_pause_is_active(1000, 0, 0));
+    assert(bellwin_pause_is_active(1000, 2000, 0));
+    assert(!bellwin_pause_is_active(2000, 2000, 0));
+    assert(!bellwin_pause_is_active(3000, 2000, 0));
+    assert(bellwin_pause_is_active(3000, 0, 1));
+    assert(bellwin_pause_is_active(3000, 2000, 1));
+}
+
 int main(void) {
     test_overnight_quiet_hours();
     test_daytime_quiet_hours();
@@ -64,6 +73,7 @@ int main(void) {
     test_clamping();
     test_time_segment_editing();
     test_time_segment_stepping_wraps_only_selected_pair();
+    test_pause_state();
     puts("core tests passed");
     return 0;
 }
