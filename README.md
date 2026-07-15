@@ -19,7 +19,8 @@ pairs.
 
 Left-clicking the tray icon opens Settings. Its context menu can ring the bell
 immediately, pause ringing for 30 minutes, 1 hour, or 2 hours, toggle an
-indefinite pause, or exit the application. After a timed or indefinite pause
+indefinite pause, or exit the application. While a timed pause is active, the
+**Pause for** submenu includes **Unpause**. After a timed or indefinite pause
 ends, Bellwin starts a fresh random interval before the next bell.
 
 ## Build

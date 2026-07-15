@@ -29,6 +29,7 @@
 #define CMD_TRAY_PAUSE_2_HOURS 1005
 #define CMD_TRAY_PAUSE_INDEFINITELY 1006
 #define CMD_TRAY_EXIT 1007
+#define CMD_TRAY_UNPAUSE 1008
 
 typedef BOOL (WINAPI *SetProcessDpiAwarenessContextFn)(HANDLE);
 typedef UINT (WINAPI *GetDpiForWindowFn)(HWND);
@@ -324,15 +325,20 @@ static void pause_for_minutes(int minutes) {
     update_tray_tip();
 }
 
+static void resume_ringing(void) {
+    ZeroMemory(&g_app.pause, sizeof(g_app.pause));
+    schedule_next_bell();
+    update_tray_tip();
+}
+
 static void toggle_indefinite_pause(void) {
     if (g_app.pause.mode == PAUSE_INDEFINITE) {
-        ZeroMemory(&g_app.pause, sizeof(g_app.pause));
-        schedule_next_bell();
-    } else {
-        g_app.pause.mode = PAUSE_INDEFINITE;
-        g_app.pause.untilTick = 0;
-        g_app.pause.selectedMinutes = 0;
+        resume_ringing();
+        return;
     }
+    g_app.pause.mode = PAUSE_INDEFINITE;
+    g_app.pause.untilTick = 0;
+    g_app.pause.selectedMinutes = 0;
     update_tray_tip();
 }
 
@@ -1013,6 +1019,10 @@ static void show_tray_menu(void) {
             MF_STRING | (timedPauseActive && g_app.pause.selectedMinutes == duration->minutes ? MF_CHECKED : MF_UNCHECKED),
             duration->command, duration->label);
     }
+    if (timedPauseActive) {
+        AppendMenuW(pauseMenu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(pauseMenu, MF_STRING, CMD_TRAY_UNPAUSE, L"Unpause");
+    }
 
     AppendMenuW(menu, MF_STRING, CMD_TRAY_SHOW, L"Settings");
     AppendMenuW(menu, MF_STRING, CMD_TRAY_RING, L"Ring now");
@@ -1182,9 +1192,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
             if (g_app.pause.mode == PAUSE_INDEFINITE) return 0;
             if (g_app.pause.mode == PAUSE_TIMED) {
                 if (pause_is_active(now)) return 0;
-                ZeroMemory(&g_app.pause, sizeof(g_app.pause));
-                update_tray_tip();
-                schedule_next_bell();
+                resume_ringing();
                 return 0;
             }
             if (now < g_app.nextBellTick) return 0;
@@ -1221,6 +1229,9 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
             return 0;
         case CMD_TRAY_PAUSE_INDEFINITELY:
             toggle_indefinite_pause();
+            return 0;
+        case CMD_TRAY_UNPAUSE:
+            if (g_app.pause.mode == PAUSE_TIMED) resume_ringing();
             return 0;
         case CMD_TRAY_EXIT:
             g_app.exiting = 1;
