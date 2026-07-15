@@ -1,0 +1,8 @@
+.build/
+Bellwin.exe
+Bellwin.pdb
+nob.exe.old
+bellwin-ui.png
+*.exp
+*.lib
+*.ilk

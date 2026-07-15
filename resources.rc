@@ -1,0 +1,5 @@
+#include "resource.h"
+
+IDI_BELLWIN ICON "resources\\bellwin.ico"
+IDR_BELL_SOUND RCDATA "BellSound.mp3"
+

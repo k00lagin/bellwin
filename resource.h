@@ -1,0 +1,8 @@
+#ifndef BELLWIN_RESOURCE_H
+#define BELLWIN_RESOURCE_H
+
+#define IDI_BELLWIN 101
+#define IDR_BELL_SOUND 201
+
+#endif
+
