@@ -10,16 +10,27 @@ static Nob_Procs procs = {0};
 
 static bool build_resources(void) {
     struct ResourceBuild {
-        const char *input;
         const char *output;
+        const char *inputs[4];
+        size_t inputCount;
     } resources[] = {
-        {"version.rc", BUILD_FOLDER "version.res"},
-        {"resources.rc", BUILD_FOLDER "resources.res"},
+        {
+            BUILD_FOLDER "version.res",
+            {"version.rc", "version.h"},
+            2,
+        },
+        {
+            BUILD_FOLDER "resources.res",
+            {"resources.rc", "resource.h", "BellSound.mp3", "resources/bellwin.ico"},
+            4,
+        },
     };
 
     for (size_t i = 0; i < sizeof(resources) / sizeof(resources[0]); ++i) {
-        if (nob_needs_rebuild1(resources[i].output, resources[i].input)) {
-            nob_cmd_append(&cmd, "llvm-rc", resources[i].input, "/r", "/fo", resources[i].output);
+        int rebuild = nob_needs_rebuild(resources[i].output, resources[i].inputs, resources[i].inputCount);
+        if (rebuild < 0) return false;
+        if (rebuild) {
+            nob_cmd_append(&cmd, "llvm-rc", resources[i].inputs[0], "/r", "/fo", resources[i].output);
             if (!nob_cmd_run(&cmd, .async = &procs)) return false;
         }
     }

@@ -292,26 +292,34 @@ static uint64_t current_version(void) {
     return ((uint64_t)VER_MAJOR << 48) | ((uint64_t)VER_MINOR << 32) | ((uint64_t)VER_PATCH << 16) | (uint64_t)VER_BUILD;
 }
 
+static int known_folder_file_path(REFKNOWNFOLDERID folderId, const wchar_t *fileName, wchar_t *path, size_t pathCount) {
+    PWSTR folder = NULL;
+    HRESULT result = SHGetKnownFolderPath(folderId, 0, NULL, &folder);
+    if (FAILED(result) || !folder) return 0;
+    int ok = swprintf_s(path, pathCount, L"%ls\\%ls", folder, fileName) >= 0;
+    CoTaskMemFree(folder);
+    return ok;
+}
+
 static void refresh_install_state(void) {
     int installed = file_exists(g_app.installedExePath);
-    g_app.updateAvailable = installed && executable_version(g_app.installedExePath) != current_version();
-    g_app.showInstall = !installed || g_app.updateAvailable;
+    uint64_t installedVersion = installed ? executable_version(g_app.installedExePath) : 0;
+    wchar_t desktopShortcut[MAX_PATH];
+    wchar_t startMenuShortcut[MAX_PATH];
+    int shortcutsReady = known_folder_file_path(&FOLDERID_Desktop, L"Bellwin.lnk", desktopShortcut, MAX_PATH)
+        && known_folder_file_path(&FOLDERID_Programs, L"Bellwin.lnk", startMenuShortcut, MAX_PATH)
+        && file_exists(desktopShortcut)
+        && file_exists(startMenuShortcut);
+    g_app.updateAvailable = installed && installedVersion < current_version();
+    g_app.showInstall = !installed || g_app.updateAvailable || !shortcutsReady;
 }
 
 static HRESULT create_shortcut(REFKNOWNFOLDERID folderId, const wchar_t *fileName, const wchar_t *target) {
-    PWSTR folder = NULL;
-    HRESULT result = SHGetKnownFolderPath(folderId, 0, NULL, &folder);
-    if (FAILED(result) || !folder) return result;
-
     wchar_t shortcutPath[MAX_PATH];
-    if (swprintf_s(shortcutPath, MAX_PATH, L"%ls\\%ls", folder, fileName) < 0) {
-        CoTaskMemFree(folder);
-        return E_FAIL;
-    }
-    CoTaskMemFree(folder);
+    if (!known_folder_file_path(folderId, fileName, shortcutPath, MAX_PATH)) return E_FAIL;
 
     IShellLinkW *link = NULL;
-    result = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, (void **)&link);
+    HRESULT result = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, (void **)&link);
     if (FAILED(result) || !link) return result;
 
     result = link->lpVtbl->SetPath(link, target);
@@ -330,7 +338,12 @@ static HRESULT create_shortcut(REFKNOWNFOLDERID folderId, const wchar_t *fileNam
 static int install_app(void) {
     wchar_t source[MAX_PATH];
     if (!GetModuleFileNameW(NULL, source, MAX_PATH)) return 0;
-    if (_wcsicmp(source, g_app.installedExePath) != 0) {
+    uint64_t installedVersion = file_exists(g_app.installedExePath)
+        ? executable_version(g_app.installedExePath)
+        : 0;
+    int shouldCopy = _wcsicmp(source, g_app.installedExePath) != 0
+        && (!file_exists(g_app.installedExePath) || installedVersion < current_version());
+    if (shouldCopy) {
         if (!CopyFileW(source, g_app.installedExePath, FALSE)) return 0;
     }
 
@@ -560,6 +573,15 @@ static void update_slider_from_mouse(int slider, int x) {
     InvalidateRect(g_app.window, NULL, FALSE);
 }
 
+static void finish_slider_drag(void) {
+    if (!g_app.draggingSlider) return;
+    int finished = g_app.draggingSlider;
+    g_app.draggingSlider = 0;
+    save_settings();
+    schedule_next_bell();
+    if (finished == 1) play_bell();
+}
+
 static void change_quiet_time(int which, int delta) {
     int *value = which == 1 ? &g_app.settings.quietStartMinutes : &g_app.settings.quietEndMinutes;
     *value = bellwin_normalize_day_minute(*value + delta);
@@ -678,16 +700,12 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
     }
     case WM_LBUTTONUP:
         if (g_app.draggingSlider) {
-            int finished = g_app.draggingSlider;
-            g_app.draggingSlider = 0;
+            finish_slider_drag();
             ReleaseCapture();
-            save_settings();
-            schedule_next_bell();
-            if (finished == 1) play_bell();
         }
         return 0;
     case WM_CAPTURECHANGED:
-        g_app.draggingSlider = 0;
+        finish_slider_drag();
         return 0;
     case WM_MOUSEWHEEL: {
         POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -783,25 +801,67 @@ static int command_line_has(const wchar_t *needle) {
     return found;
 }
 
+static int current_copy_is_newer_than_installed(void) {
+    wchar_t currentExe[MAX_PATH];
+    if (!GetModuleFileNameW(NULL, currentExe, MAX_PATH)) return 0;
+    if (_wcsicmp(currentExe, g_app.installedExePath) == 0) return 0;
+    if (!file_exists(g_app.installedExePath)) return 0;
+    return current_version() > executable_version(g_app.installedExePath);
+}
+
+static int take_over_from_older_instance(void) {
+    HWND existing = NULL;
+    for (int attempt = 0; attempt < 40 && !existing; ++attempt) {
+        existing = FindWindowW(APP_CLASS, NULL);
+        if (!existing) Sleep(50);
+    }
+    if (!existing) return 0;
+    PostMessageW(existing, WM_COMMAND, CMD_TRAY_EXIT, 0);
+
+    if (g_app.mutex) {
+        CloseHandle(g_app.mutex);
+        g_app.mutex = NULL;
+    }
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        HANDLE mutex = CreateMutexW(NULL, FALSE, APP_MUTEX);
+        if (mutex && GetLastError() != ERROR_ALREADY_EXISTS) {
+            g_app.mutex = mutex;
+            return 1;
+        }
+        if (mutex) CloseHandle(mutex);
+        Sleep(50);
+    }
+    return 0;
+}
+
 int main(void) {
     ZeroMemory(&g_app, sizeof(g_app));
     g_app.instance = GetModuleHandleW(NULL);
     int background = command_line_has(L"--background");
 
-    g_app.mutex = CreateMutexW(NULL, FALSE, APP_MUTEX);
-    if (g_app.mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
-        HWND existing = FindWindowW(APP_CLASS, NULL);
-        if (existing && !background) PostMessageW(existing, WM_SHOW_BELLWIN, 0, 0);
-        CloseHandle(g_app.mutex);
-        return 0;
-    }
-
-    enable_dpi_awareness();
-    HRESULT com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     if (!ensure_app_directory()) {
         MessageBoxW(NULL, L"Could not create the Bellwin data folder.", APP_NAME, MB_OK | MB_ICONERROR);
         return 1;
     }
+
+    g_app.mutex = CreateMutexW(NULL, FALSE, APP_MUTEX);
+    if (g_app.mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (current_copy_is_newer_than_installed()) {
+            if (!take_over_from_older_instance()) {
+                MessageBoxW(NULL, L"The older Bellwin instance could not be closed for updating.", APP_NAME, MB_OK | MB_ICONERROR);
+                return 1;
+            }
+            background = 0;
+        } else {
+            HWND existing = FindWindowW(APP_CLASS, NULL);
+            if (existing && !background) PostMessageW(existing, WM_SHOW_BELLWIN, 0, 0);
+            CloseHandle(g_app.mutex);
+            return 0;
+        }
+    }
+
+    enable_dpi_awareness();
+    HRESULT com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     load_settings();
     g_app.autoStart = is_autostart_enabled();
     refresh_install_state();
