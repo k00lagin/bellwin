@@ -29,6 +29,37 @@
 typedef BOOL (WINAPI *SetProcessDpiAwarenessContextFn)(HANDLE);
 typedef UINT (WINAPI *GetDpiForWindowFn)(HWND);
 
+typedef enum ControlId {
+    CONTROL_NONE,
+    CONTROL_VOLUME,
+    CONTROL_MINIMUM_INTERVAL,
+    CONTROL_MAXIMUM_INTERVAL,
+    CONTROL_QUIET_START,
+    CONTROL_QUIET_END,
+    CONTROL_AUTOSTART,
+    CONTROL_INSTALL,
+} ControlId;
+
+enum UiGeometry {
+    SLIDER_LEFT = 330,
+    SLIDER_RIGHT = 565,
+    VOLUME_SLIDER_Y = 122,
+    MINIMUM_SLIDER_Y = 178,
+    MAXIMUM_SLIDER_Y = 234,
+    QUIET_START_X = 330,
+    QUIET_END_X = 480,
+    QUIET_TIME_Y = 292,
+    TIME_BOX_WIDTH = 110,
+    TIME_BOX_HEIGHT = 40,
+    TIME_STEPPER_X_OFFSET = 84,
+    TOGGLE_X = 190,
+    TOGGLE_Y = 390,
+    INSTALL_LEFT = 610,
+    INSTALL_TOP = 385,
+    INSTALL_RIGHT = 710,
+    INSTALL_BOTTOM = 425,
+};
+
 typedef struct AppState {
     HINSTANCE instance;
     HWND window;
@@ -41,7 +72,12 @@ typedef struct AppState {
     HFONT bodyFont;
     HFONT smallFont;
     int dpi;
-    int draggingSlider;
+    ControlId draggingSlider;
+    ControlId focusedControl;
+    BellwinTimeSegment timeSegment;
+    int timeDigitCount;
+    int timeFirstDigit;
+    int windowFocused;
     int hoverInstall;
     int autoStart;
     int showInstall;
@@ -383,9 +419,23 @@ static void draw_text(HDC dc, const wchar_t *text, RECT rect, HFONT font, COLORR
     SelectObject(dc, oldFont);
 }
 
-static void draw_slider(HDC dc, int y, int value, int minimum, int maximum, int ticks, const wchar_t *valueText) {
-    const int left = 330;
-    const int right = 565;
+static void draw_focus_outline(HDC dc, const RECT *rect, int radius) {
+    HPEN pen = CreatePen(PS_SOLID, px(2), RGB(0, 95, 184));
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    RoundRect(dc, rect->left, rect->top, rect->right, rect->bottom, px(radius), px(radius));
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(pen);
+}
+
+static int control_has_visible_focus(ControlId control) {
+    return g_app.windowFocused && g_app.focusedControl == control;
+}
+
+static void draw_slider(HDC dc, ControlId control, int y, int value, int minimum, int maximum, int ticks, const wchar_t *valueText) {
+    const int left = SLIDER_LEFT;
+    const int right = SLIDER_RIGHT;
     int position = left + MulDiv(value - minimum, right - left, maximum - minimum);
     RECT inactive = logical_rect(left, y - 2, right, y + 2);
     RECT active = logical_rect(left, y - 2, position, y + 2);
@@ -416,6 +466,10 @@ static void draw_slider(HDC dc, int y, int value, int minimum, int maximum, int 
 
     RECT valueRect = logical_rect(590, y - 20, 690, y + 20);
     draw_text(dc, valueText, valueRect, g_app.bodyFont, RGB(96, 96, 96), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    if (control_has_visible_focus(control)) {
+        RECT focus = logical_rect(315, y - 21, 700, y + 21);
+        draw_focus_outline(dc, &focus, 6);
+    }
 }
 
 static void format_interval(int minutes, wchar_t *buffer, size_t count) {
@@ -440,13 +494,26 @@ static void draw_triangle(HDC dc, POINT points[3], COLORREF color) {
     DeleteObject(pen);
 }
 
-static void draw_time_box(HDC dc, int x, int y, int minuteOfDay) {
+static void draw_time_box(HDC dc, ControlId control, int x, int y, int minuteOfDay) {
     RECT box = logical_rect(x, y, x + 110, y + 40);
-    rounded_rect(dc, &box, 3, RGB(255, 255, 255), RGB(194, 196, 200));
-    wchar_t timeText[16];
-    swprintf_s(timeText, 16, L"%02d:%02d", minuteOfDay / 60, minuteOfDay % 60);
-    RECT textRect = logical_rect(x + 8, y, x + 84, y + 40);
-    draw_text(dc, timeText, textRect, g_app.bodyFont, RGB(32, 32, 32), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    int focused = control_has_visible_focus(control);
+    rounded_rect(dc, &box, 3, RGB(255, 255, 255), focused ? RGB(0, 95, 184) : RGB(194, 196, 200));
+
+    RECT hoursRect = logical_rect(x + 6, y + 4, x + 38, y + 36);
+    RECT colonRect = logical_rect(x + 38, y + 4, x + 48, y + 36);
+    RECT minutesRect = logical_rect(x + 48, y + 4, x + 80, y + 36);
+    RECT *selectedRect = g_app.timeSegment == BELLWIN_TIME_HOURS ? &hoursRect : &minutesRect;
+    if (focused) rounded_rect(dc, selectedRect, 3, RGB(0, 120, 212), RGB(0, 120, 212));
+
+    wchar_t hoursText[3];
+    wchar_t minutesText[3];
+    swprintf_s(hoursText, 3, L"%02d", minuteOfDay / 60);
+    swprintf_s(minutesText, 3, L"%02d", minuteOfDay % 60);
+    COLORREF hoursColor = focused && g_app.timeSegment == BELLWIN_TIME_HOURS ? RGB(255, 255, 255) : RGB(32, 32, 32);
+    COLORREF minutesColor = focused && g_app.timeSegment == BELLWIN_TIME_MINUTES ? RGB(255, 255, 255) : RGB(32, 32, 32);
+    draw_text(dc, hoursText, hoursRect, g_app.bodyFont, hoursColor, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    draw_text(dc, L":", colonRect, g_app.bodyFont, RGB(32, 32, 32), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    draw_text(dc, minutesText, minutesRect, g_app.bodyFont, minutesColor, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     HPEN divider = CreatePen(PS_SOLID, 1, RGB(218, 220, 223));
     HGDIOBJ oldPen = SelectObject(dc, divider);
@@ -461,6 +528,7 @@ static void draw_time_box(HDC dc, int x, int y, int minuteOfDay) {
     POINT down[3] = {{px(x + 91), px(y + 26)}, {px(x + 97), px(y + 32)}, {px(x + 103), px(y + 26)}};
     draw_triangle(dc, up, RGB(80, 80, 80));
     draw_triangle(dc, down, RGB(80, 80, 80));
+    if (focused) draw_focus_outline(dc, &box, 3);
 }
 
 static void draw_toggle(HDC dc, int x, int y, int on) {
@@ -476,11 +544,15 @@ static void draw_toggle(HDC dc, int x, int y, int on) {
     SelectObject(dc, oldPen);
     DeleteObject(brush);
     DeleteObject(pen);
+    if (control_has_visible_focus(CONTROL_AUTOSTART)) {
+        RECT focus = logical_rect(x - 5, y - 5, x + 59, y + 35);
+        draw_focus_outline(dc, &focus, 20);
+    }
 }
 
 static void draw_install_button(HDC dc) {
     if (!g_app.showInstall) return;
-    RECT button = logical_rect(610, 385, 710, 425);
+    RECT button = logical_rect(INSTALL_LEFT, INSTALL_TOP, INSTALL_RIGHT, INSTALL_BOTTOM);
     COLORREF fill = g_app.hoverInstall ? RGB(229, 241, 251) : RGB(255, 255, 255);
     rounded_rect(dc, &button, 5, fill, RGB(145, 149, 154));
     draw_text(
@@ -491,6 +563,7 @@ static void draw_install_button(HDC dc) {
         RGB(32, 32, 32),
         DT_CENTER | DT_VCENTER | DT_SINGLELINE
     );
+    if (control_has_visible_focus(CONTROL_INSTALL)) draw_focus_outline(dc, &button, 5);
 }
 
 static void paint_ui(HWND window) {
@@ -519,24 +592,24 @@ static void paint_ui(HWND window) {
 
     wchar_t valueText[32];
     swprintf_s(valueText, 32, L"%d%%", g_app.settings.volume);
-    draw_slider(dc, 122, g_app.settings.volume, 0, 100, 0, valueText);
+    draw_slider(dc, CONTROL_VOLUME, VOLUME_SLIDER_Y, g_app.settings.volume, 0, 100, 0, valueText);
     format_interval(g_app.settings.minimumMinutes, valueText, 32);
-    draw_slider(dc, 178, g_app.settings.minimumMinutes, 30, 480, 16, valueText);
+    draw_slider(dc, CONTROL_MINIMUM_INTERVAL, MINIMUM_SLIDER_Y, g_app.settings.minimumMinutes, 30, 480, 16, valueText);
     format_interval(g_app.settings.maximumMinutes, valueText, 32);
-    draw_slider(dc, 234, g_app.settings.maximumMinutes, 30, 480, 16, valueText);
+    draw_slider(dc, CONTROL_MAXIMUM_INTERVAL, MAXIMUM_SLIDER_Y, g_app.settings.maximumMinutes, 30, 480, 16, valueText);
 
     RECT divider = logical_rect(78, 271, 682, 272);
     fill_rect_color(dc, &divider, RGB(220, 220, 220));
     label = logical_rect(78, 291, 310, 333);
     draw_text(dc, L"Quiet hours", label, g_app.bodyFont, RGB(32, 32, 32), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    draw_time_box(dc, 330, 292, g_app.settings.quietStartMinutes);
+    draw_time_box(dc, CONTROL_QUIET_START, QUIET_START_X, QUIET_TIME_Y, g_app.settings.quietStartMinutes);
     RECT ellipsis = logical_rect(446, 292, 474, 332);
     draw_text(dc, L"…", ellipsis, g_app.bodyFont, RGB(100, 100, 100), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    draw_time_box(dc, 480, 292, g_app.settings.quietEndMinutes);
+    draw_time_box(dc, CONTROL_QUIET_END, QUIET_END_X, QUIET_TIME_Y, g_app.settings.quietEndMinutes);
 
     label = logical_rect(40, 379, 185, 431);
     draw_text(dc, L"Launch at login", label, g_app.bodyFont, RGB(32, 32, 32), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    draw_toggle(dc, 190, 390, g_app.autoStart);
+    draw_toggle(dc, TOGGLE_X, TOGGLE_Y, g_app.autoStart);
     draw_install_button(dc);
 
     BitBlt(target, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
@@ -546,48 +619,188 @@ static void paint_ui(HWND window) {
     EndPaint(window, &paint);
 }
 
-static int slider_value_from_x(int slider, int x) {
+static int is_slider_control(ControlId control) {
+    return control >= CONTROL_VOLUME && control <= CONTROL_MAXIMUM_INTERVAL;
+}
+
+static int is_time_control(ControlId control) {
+    return control == CONTROL_QUIET_START || control == CONTROL_QUIET_END;
+}
+
+static int slider_y(ControlId control) {
+    if (control == CONTROL_VOLUME) return VOLUME_SLIDER_Y;
+    if (control == CONTROL_MINIMUM_INTERVAL) return MINIMUM_SLIDER_Y;
+    return MAXIMUM_SLIDER_Y;
+}
+
+static ControlId slider_at_point(int x, int y) {
+    if (x < 315 || x >= 700) return CONTROL_NONE;
+    ControlId sliders[] = {CONTROL_VOLUME, CONTROL_MINIMUM_INTERVAL, CONTROL_MAXIMUM_INTERVAL};
+    for (size_t i = 0; i < sizeof(sliders) / sizeof(sliders[0]); ++i) {
+        int rowY = slider_y(sliders[i]);
+        if (y >= rowY - 21 && y < rowY + 21) return sliders[i];
+    }
+    return CONTROL_NONE;
+}
+
+static int time_x(ControlId control) {
+    return control == CONTROL_QUIET_START ? QUIET_START_X : QUIET_END_X;
+}
+
+static int *time_value(ControlId control) {
+    return control == CONTROL_QUIET_START
+        ? &g_app.settings.quietStartMinutes
+        : &g_app.settings.quietEndMinutes;
+}
+
+static int hit_time_segment(int x, int y, ControlId *control, BellwinTimeSegment *segment) {
+    if (y < QUIET_TIME_Y || y >= QUIET_TIME_Y + TIME_BOX_HEIGHT) return 0;
+    ControlId times[] = {CONTROL_QUIET_START, CONTROL_QUIET_END};
+    for (size_t i = 0; i < sizeof(times) / sizeof(times[0]); ++i) {
+        int left = time_x(times[i]);
+        if (x >= left + 6 && x < left + 38) {
+            *control = times[i];
+            *segment = BELLWIN_TIME_HOURS;
+            return 1;
+        }
+        if (x >= left + 48 && x < left + 80) {
+            *control = times[i];
+            *segment = BELLWIN_TIME_MINUTES;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void focus_control(ControlId control) {
+    if (control == CONTROL_INSTALL && !g_app.showInstall) control = CONTROL_AUTOSTART;
+    if (GetFocus() != g_app.window) SetFocus(g_app.window);
+    if (g_app.focusedControl != control) {
+        g_app.focusedControl = control;
+        g_app.timeDigitCount = 0;
+        if (is_time_control(control)) g_app.timeSegment = BELLWIN_TIME_HOURS;
+    }
+    InvalidateRect(g_app.window, NULL, FALSE);
+}
+
+static void move_focus(int direction) {
+    int first = CONTROL_VOLUME;
+    int last = g_app.showInstall ? CONTROL_INSTALL : CONTROL_AUTOSTART;
+    int current = g_app.focusedControl;
+    if (current < first || current > last) current = direction > 0 ? last : first;
+    current += direction;
+    if (current > last) current = first;
+    if (current < first) current = last;
+    focus_control((ControlId)current);
+}
+
+static int slider_value_from_x(ControlId slider, int x) {
     int value;
-    x = bellwin_clamp_int(x, 330, 565);
-    if (slider == 1) {
-        value = MulDiv(x - 330, 100, 565 - 330);
+    x = bellwin_clamp_int(x, SLIDER_LEFT, SLIDER_RIGHT);
+    if (slider == CONTROL_VOLUME) {
+        value = MulDiv(x - SLIDER_LEFT, 100, SLIDER_RIGHT - SLIDER_LEFT);
     } else {
-        value = 30 + MulDiv(x - 330, 480 - 30, 565 - 330);
+        value = 30 + MulDiv(x - SLIDER_LEFT, 480 - 30, SLIDER_RIGHT - SLIDER_LEFT);
         value = ((value + 15) / 30) * 30;
         value = bellwin_clamp_int(value, 30, 480);
     }
     return value;
 }
 
-static void update_slider_from_mouse(int slider, int x) {
-    int value = slider_value_from_x(slider, x);
-    if (slider == 1) {
-        g_app.settings.volume = value;
-    } else if (slider == 2) {
-        g_app.settings.minimumMinutes = value;
-        if (g_app.settings.maximumMinutes < value) g_app.settings.maximumMinutes = value;
-    } else if (slider == 3) {
-        g_app.settings.maximumMinutes = value;
-        if (g_app.settings.minimumMinutes > value) g_app.settings.minimumMinutes = value;
+static void set_slider_value(ControlId slider, int value, int persist) {
+    if (slider == CONTROL_VOLUME) {
+        g_app.settings.volume = bellwin_clamp_int(value, 0, 100);
+    } else if (slider == CONTROL_MINIMUM_INTERVAL) {
+        g_app.settings.minimumMinutes = bellwin_clamp_int(value, 30, 480);
+        if (g_app.settings.maximumMinutes < g_app.settings.minimumMinutes) {
+            g_app.settings.maximumMinutes = g_app.settings.minimumMinutes;
+        }
+    } else if (slider == CONTROL_MAXIMUM_INTERVAL) {
+        g_app.settings.maximumMinutes = bellwin_clamp_int(value, 30, 480);
+        if (g_app.settings.minimumMinutes > g_app.settings.maximumMinutes) {
+            g_app.settings.minimumMinutes = g_app.settings.maximumMinutes;
+        }
+    }
+    if (persist) {
+        save_settings();
+        schedule_next_bell();
     }
     InvalidateRect(g_app.window, NULL, FALSE);
 }
 
-static void finish_slider_drag(void) {
-    if (!g_app.draggingSlider) return;
-    int finished = g_app.draggingSlider;
-    g_app.draggingSlider = 0;
-    save_settings();
-    schedule_next_bell();
-    if (finished == 1) play_bell();
+static void update_slider_from_mouse(ControlId slider, int x) {
+    int value = slider_value_from_x(slider, x);
+    set_slider_value(slider, value, 0);
 }
 
-static void change_quiet_time(int which, int delta) {
-    int *value = which == 1 ? &g_app.settings.quietStartMinutes : &g_app.settings.quietEndMinutes;
-    *value = bellwin_normalize_day_minute(*value + delta);
+static void step_slider(ControlId slider, int direction, int wheel) {
+    int step = slider == CONTROL_VOLUME ? (wheel ? 5 : 1) : 30;
+    int current = slider == CONTROL_VOLUME
+        ? g_app.settings.volume
+        : slider == CONTROL_MINIMUM_INTERVAL
+            ? g_app.settings.minimumMinutes
+            : g_app.settings.maximumMinutes;
+    set_slider_value(slider, current + direction * step, 1);
+}
+
+static void finish_slider_drag(void) {
+    if (!g_app.draggingSlider) return;
+    ControlId finished = g_app.draggingSlider;
+    g_app.draggingSlider = CONTROL_NONE;
+    save_settings();
+    schedule_next_bell();
+    if (finished == CONTROL_VOLUME) play_bell();
+}
+
+static void set_time_value(ControlId control, int value) {
+    *time_value(control) = bellwin_normalize_day_minute(value);
     save_settings();
     schedule_next_bell();
     InvalidateRect(g_app.window, NULL, FALSE);
+}
+
+static void step_time_value(ControlId control, BellwinTimeSegment segment, int delta) {
+    g_app.timeDigitCount = 0;
+    set_time_value(control, bellwin_step_time_segment(*time_value(control), segment, delta));
+}
+
+static void enter_time_digit(int digit) {
+    if (!is_time_control(g_app.focusedControl)) return;
+    int value;
+    if (g_app.timeDigitCount == 0) {
+        g_app.timeFirstDigit = digit;
+        g_app.timeDigitCount = 1;
+        value = digit;
+    } else {
+        value = g_app.timeFirstDigit * 10 + digit;
+        g_app.timeDigitCount = 0;
+    }
+    int updated = bellwin_set_time_segment(*time_value(g_app.focusedControl), g_app.timeSegment, value);
+    set_time_value(g_app.focusedControl, updated);
+    if (g_app.timeDigitCount == 0 && g_app.timeSegment == BELLWIN_TIME_HOURS) {
+        g_app.timeSegment = BELLWIN_TIME_MINUTES;
+        InvalidateRect(g_app.window, NULL, FALSE);
+    }
+}
+
+static void activate_autostart(void) {
+    int desired = !g_app.autoStart;
+    if (set_autostart(desired)) {
+        g_app.autoStart = desired;
+        InvalidateRect(g_app.window, NULL, FALSE);
+    } else {
+        MessageBoxW(g_app.window, L"Could not change the startup setting.", APP_NAME, MB_OK | MB_ICONERROR);
+    }
+}
+
+static void activate_install(void) {
+    if (!g_app.showInstall) return;
+    if (install_app()) {
+        MessageBoxW(g_app.window, L"Bellwin was installed. Shortcuts were added to the Desktop and Start menu.", APP_NAME, MB_OK | MB_ICONINFORMATION);
+    } else {
+        MessageBoxW(g_app.window, L"Bellwin could not be installed.", APP_NAME, MB_OK | MB_ICONERROR);
+    }
+    if (!g_app.showInstall && g_app.focusedControl == CONTROL_INSTALL) focus_control(CONTROL_AUTOSTART);
 }
 
 static void add_tray_icon(void) {
@@ -612,6 +825,7 @@ static void remove_tray_icon(void) {
 static void show_window(void) {
     ShowWindow(g_app.window, SW_RESTORE);
     SetForegroundWindow(g_app.window);
+    SetFocus(g_app.window);
 }
 
 static void show_tray_menu(void) {
@@ -639,6 +853,15 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         return 0;
     case WM_ERASEBKGND:
         return 1;
+    case WM_SETFOCUS:
+        g_app.windowFocused = 1;
+        InvalidateRect(window, NULL, FALSE);
+        return 0;
+    case WM_KILLFOCUS:
+        g_app.windowFocused = 0;
+        g_app.timeDigitCount = 0;
+        InvalidateRect(window, NULL, FALSE);
+        return 0;
     case WM_DPICHANGED: {
         g_app.dpi = HIWORD(wParam);
         create_fonts();
@@ -651,38 +874,47 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
     case WM_LBUTTONDOWN: {
         int x = logical_x(lParam);
         int y = logical_y(lParam);
-        if (point_in(x, y, 320, 107, 575, 137)) g_app.draggingSlider = 1;
-        else if (point_in(x, y, 320, 163, 575, 193)) g_app.draggingSlider = 2;
-        else if (point_in(x, y, 320, 219, 575, 249)) g_app.draggingSlider = 3;
-        if (g_app.draggingSlider) {
-            SetCapture(window);
-            update_slider_from_mouse(g_app.draggingSlider, x);
-            return 0;
-        }
-        if (point_in(x, y, 190, 390, 244, 420)) {
-            int desired = !g_app.autoStart;
-            if (set_autostart(desired)) {
-                g_app.autoStart = desired;
-                InvalidateRect(window, NULL, FALSE);
-            } else {
-                MessageBoxW(window, L"Could not change the startup setting.", APP_NAME, MB_OK | MB_ICONERROR);
+        SetFocus(window);
+
+        ControlId slider = slider_at_point(x, y);
+        if (slider != CONTROL_NONE) {
+            focus_control(slider);
+            if (x >= SLIDER_LEFT - 10 && x < SLIDER_RIGHT + 10) {
+                g_app.draggingSlider = slider;
+                SetCapture(window);
+                update_slider_from_mouse(slider, x);
             }
             return 0;
         }
-        if (g_app.showInstall && point_in(x, y, 610, 385, 710, 425)) {
-            if (install_app()) {
-                MessageBoxW(window, L"Bellwin was installed. Shortcuts were added to the Desktop and Start menu.", APP_NAME, MB_OK | MB_ICONINFORMATION);
-            } else {
-                MessageBoxW(window, L"Bellwin could not be installed.", APP_NAME, MB_OK | MB_ICONERROR);
+
+        ControlId timeControl;
+        BellwinTimeSegment timeSegment;
+        if (hit_time_segment(x, y, &timeControl, &timeSegment)) {
+            focus_control(timeControl);
+            g_app.timeSegment = timeSegment;
+            g_app.timeDigitCount = 0;
+            InvalidateRect(window, NULL, FALSE);
+            return 0;
+        }
+
+        ControlId timeControls[] = {CONTROL_QUIET_START, CONTROL_QUIET_END};
+        for (size_t i = 0; i < sizeof(timeControls) / sizeof(timeControls[0]); ++i) {
+            int left = time_x(timeControls[i]);
+            if (point_in(x, y, left + TIME_STEPPER_X_OFFSET, QUIET_TIME_Y, left + TIME_BOX_WIDTH, QUIET_TIME_Y + TIME_BOX_HEIGHT)) {
+                focus_control(timeControls[i]);
+                step_time_value(timeControls[i], g_app.timeSegment, y < QUIET_TIME_Y + TIME_BOX_HEIGHT / 2 ? 1 : -1);
+                return 0;
             }
+        }
+
+        if (point_in(x, y, TOGGLE_X, TOGGLE_Y, TOGGLE_X + 54, TOGGLE_Y + 30)) {
+            focus_control(CONTROL_AUTOSTART);
+            activate_autostart();
             return 0;
         }
-        if (point_in(x, y, 414, 292, 440, 332)) {
-            change_quiet_time(1, y < 312 ? 30 : -30);
-            return 0;
-        }
-        if (point_in(x, y, 564, 292, 590, 332)) {
-            change_quiet_time(2, y < 312 ? 30 : -30);
+        if (g_app.showInstall && point_in(x, y, INSTALL_LEFT, INSTALL_TOP, INSTALL_RIGHT, INSTALL_BOTTOM)) {
+            focus_control(CONTROL_INSTALL);
+            activate_install();
             return 0;
         }
         return 0;
@@ -691,7 +923,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         int x = logical_x(lParam);
         int y = logical_y(lParam);
         if (g_app.draggingSlider) update_slider_from_mouse(g_app.draggingSlider, x);
-        int hover = g_app.showInstall && point_in(x, y, 610, 385, 710, 425);
+        int hover = g_app.showInstall && point_in(x, y, INSTALL_LEFT, INSTALL_TOP, INSTALL_RIGHT, INSTALL_BOTTOM);
         if (hover != g_app.hoverInstall) {
             g_app.hoverInstall = hover;
             InvalidateRect(window, NULL, FALSE);
@@ -712,9 +944,34 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         ScreenToClient(window, &point);
         int x = MulDiv(point.x, 96, g_app.dpi);
         int y = MulDiv(point.y, 96, g_app.dpi);
-        int delta = GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 30 : -30;
-        if (point_in(x, y, 330, 292, 440, 332)) change_quiet_time(1, delta);
-        else if (point_in(x, y, 480, 292, 590, 332)) change_quiet_time(2, delta);
+        int steps = GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
+        if (steps == 0) steps = GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 1 : -1;
+
+        ControlId slider = slider_at_point(x, y);
+        if (slider != CONTROL_NONE) {
+            focus_control(slider);
+            step_slider(slider, steps, 1);
+            return 0;
+        }
+
+        ControlId timeControl;
+        BellwinTimeSegment timeSegment;
+        if (hit_time_segment(x, y, &timeControl, &timeSegment)) {
+            focus_control(timeControl);
+            g_app.timeSegment = timeSegment;
+            step_time_value(timeControl, timeSegment, steps);
+            return 0;
+        }
+
+        ControlId timeControls[] = {CONTROL_QUIET_START, CONTROL_QUIET_END};
+        for (size_t i = 0; i < sizeof(timeControls) / sizeof(timeControls[0]); ++i) {
+            int left = time_x(timeControls[i]);
+            if (point_in(x, y, left + TIME_STEPPER_X_OFFSET, QUIET_TIME_Y, left + TIME_BOX_WIDTH, QUIET_TIME_Y + TIME_BOX_HEIGHT)) {
+                focus_control(timeControls[i]);
+                step_time_value(timeControls[i], g_app.timeSegment, steps);
+                return 0;
+            }
+        }
         return 0;
     }
     case WM_SETCURSOR: {
@@ -723,10 +980,16 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         ScreenToClient(window, &point);
         int x = MulDiv(point.x, 96, g_app.dpi);
         int y = MulDiv(point.y, 96, g_app.dpi);
-        if (point_in(x, y, 190, 390, 244, 420)
-            || (g_app.showInstall && point_in(x, y, 610, 385, 710, 425))
-            || point_in(x, y, 414, 292, 440, 332)
-            || point_in(x, y, 564, 292, 590, 332)) {
+        ControlId timeControl;
+        BellwinTimeSegment timeSegment;
+        if (hit_time_segment(x, y, &timeControl, &timeSegment)) {
+            SetCursor(LoadCursorW(NULL, IDC_IBEAM));
+            return TRUE;
+        }
+        if (point_in(x, y, TOGGLE_X, TOGGLE_Y, TOGGLE_X + 54, TOGGLE_Y + 30)
+            || (g_app.showInstall && point_in(x, y, INSTALL_LEFT, INSTALL_TOP, INSTALL_RIGHT, INSTALL_BOTTOM))
+            || point_in(x, y, QUIET_START_X + TIME_STEPPER_X_OFFSET, QUIET_TIME_Y, QUIET_START_X + TIME_BOX_WIDTH, QUIET_TIME_Y + TIME_BOX_HEIGHT)
+            || point_in(x, y, QUIET_END_X + TIME_STEPPER_X_OFFSET, QUIET_TIME_Y, QUIET_END_X + TIME_BOX_WIDTH, QUIET_TIME_Y + TIME_BOX_HEIGHT)) {
             SetCursor(LoadCursorW(NULL, IDC_HAND));
             return TRUE;
         }
@@ -765,7 +1028,39 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         show_window();
         return 0;
     case WM_KEYDOWN:
+        if (wParam == VK_TAB) {
+            move_focus((GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1);
+            return 0;
+        }
+        if ((wParam == VK_LEFT || wParam == VK_RIGHT) && is_slider_control(g_app.focusedControl)) {
+            step_slider(g_app.focusedControl, wParam == VK_RIGHT ? 1 : -1, 0);
+            return 0;
+        }
+        if ((wParam == VK_UP || wParam == VK_DOWN) && is_time_control(g_app.focusedControl)) {
+            step_time_value(g_app.focusedControl, g_app.timeSegment, wParam == VK_UP ? 1 : -1);
+            return 0;
+        }
+        if ((wParam == VK_SPACE || wParam == VK_RETURN) && !(lParam & (1L << 30))) {
+            if (g_app.focusedControl == CONTROL_AUTOSTART) {
+                activate_autostart();
+                return 0;
+            }
+            if (g_app.focusedControl == CONTROL_INSTALL) {
+                activate_install();
+                return 0;
+            }
+        }
         if (wParam == VK_ESCAPE) ShowWindow(window, SW_HIDE);
+        return 0;
+    case WM_CHAR:
+        if (is_time_control(g_app.focusedControl) && wParam >= L'0' && wParam <= L'9') {
+            enter_time_digit((int)(wParam - L'0'));
+            return 0;
+        }
+        if ((g_app.focusedControl == CONTROL_AUTOSTART || g_app.focusedControl == CONTROL_INSTALL)
+            && (wParam == L' ' || wParam == L'\r')) {
+            return 0;
+        }
         return 0;
     case WM_CLOSE:
         if (g_app.exiting) DestroyWindow(window);

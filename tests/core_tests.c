@@ -41,12 +41,29 @@ static void test_clamping(void) {
     assert(settings.quietEndMinutes == 560);
 }
 
+static void test_time_segment_editing(void) {
+    int time = 22 * 60 + 45;
+    assert(bellwin_set_time_segment(time, BELLWIN_TIME_HOURS, 7) == 7 * 60 + 45);
+    assert(bellwin_set_time_segment(time, BELLWIN_TIME_MINUTES, 9) == 22 * 60 + 9);
+    assert(bellwin_set_time_segment(time, BELLWIN_TIME_HOURS, 99) == 23 * 60 + 45);
+    assert(bellwin_set_time_segment(time, BELLWIN_TIME_MINUTES, 99) == 22 * 60 + 59);
+}
+
+static void test_time_segment_stepping_wraps_only_selected_pair(void) {
+    assert(bellwin_step_time_segment(23 * 60 + 15, BELLWIN_TIME_HOURS, 1) == 15);
+    assert(bellwin_step_time_segment(15, BELLWIN_TIME_HOURS, -1) == 23 * 60 + 15);
+    assert(bellwin_step_time_segment(9 * 60 + 59, BELLWIN_TIME_MINUTES, 1) == 9 * 60);
+    assert(bellwin_step_time_segment(9 * 60, BELLWIN_TIME_MINUTES, -1) == 9 * 60 + 59);
+}
+
 int main(void) {
     test_overnight_quiet_hours();
     test_daytime_quiet_hours();
     test_minutes_until_quiet_end();
     test_random_delay_is_inclusive();
     test_clamping();
+    test_time_segment_editing();
+    test_time_segment_stepping_wraps_only_selected_pair();
     puts("core tests passed");
     return 0;
 }

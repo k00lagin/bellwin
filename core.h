@@ -11,6 +11,11 @@ typedef struct BellwinSettings {
     int quietEndMinutes;
 } BellwinSettings;
 
+typedef enum BellwinTimeSegment {
+    BELLWIN_TIME_HOURS,
+    BELLWIN_TIME_MINUTES,
+} BellwinTimeSegment;
+
 static int bellwin_clamp_int(int value, int minimum, int maximum) {
     if (value < minimum) return minimum;
     if (value > maximum) return maximum;
@@ -64,6 +69,29 @@ static int bellwin_random_delay_minutes(int minimumMinutes, int maximumMinutes, 
         maximumMinutes = swap;
     }
     return minimumMinutes + (int)(randomValue % (uint32_t)(maximumMinutes - minimumMinutes + 1));
+}
+
+static int bellwin_set_time_segment(int minuteOfDay, BellwinTimeSegment segment, int value) {
+    minuteOfDay = bellwin_normalize_day_minute(minuteOfDay);
+    int hours = minuteOfDay / 60;
+    int minutes = minuteOfDay % 60;
+    if (segment == BELLWIN_TIME_HOURS) hours = bellwin_clamp_int(value, 0, 23);
+    else minutes = bellwin_clamp_int(value, 0, 59);
+    return hours * 60 + minutes;
+}
+
+static int bellwin_step_time_segment(int minuteOfDay, BellwinTimeSegment segment, int delta) {
+    minuteOfDay = bellwin_normalize_day_minute(minuteOfDay);
+    int hours = minuteOfDay / 60;
+    int minutes = minuteOfDay % 60;
+    if (segment == BELLWIN_TIME_HOURS) {
+        hours = (hours + delta) % 24;
+        if (hours < 0) hours += 24;
+    } else {
+        minutes = (minutes + delta) % 60;
+        if (minutes < 0) minutes += 60;
+    }
+    return hours * 60 + minutes;
 }
 
 #endif
