@@ -872,6 +872,21 @@ static void step_slider(ControlId slider, int direction, int wheel) {
     set_slider_value(slider, current + direction * step, 1);
 }
 
+static void wheel_logical_point(LPARAM lParam, int *x, int *y) {
+    POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+    ScreenToClient(g_app.window, &point);
+    *x = MulDiv(point.x, 96, g_app.dpi);
+    *y = MulDiv(point.y, 96, g_app.dpi);
+}
+
+static int step_hovered_slider(WheelTargetKind kind, int x, int y, int delta) {
+    ControlId slider = slider_at_point(x, y);
+    if (slider == CONTROL_NONE) return 0;
+    int steps = consume_wheel_steps(kind, slider, BELLWIN_TIME_HOURS, delta);
+    if (steps) step_slider(slider, steps, 1);
+    return 1;
+}
+
 static void finish_slider_drag(void) {
     if (!g_app.draggingSlider) return;
     ControlId finished = g_app.draggingSlider;
@@ -1043,8 +1058,6 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
     case WM_LBUTTONDOWN: {
         int x = logical_x(lParam);
         int y = logical_y(lParam);
-        SetFocus(window);
-        set_focus_visibility(FOCUS_HIDDEN);
 
         ControlId slider = slider_at_point(x, y);
         if (slider != CONTROL_NONE) {
@@ -1083,6 +1096,8 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
             activate_install();
             return 0;
         }
+        if (GetFocus() != window) SetFocus(window);
+        set_focus_visibility(FOCUS_HIDDEN);
         return 0;
     }
     case WM_MOUSEMOVE: {
@@ -1106,18 +1121,12 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         finish_slider_drag();
         return 0;
     case WM_MOUSEWHEEL: {
-        POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        ScreenToClient(window, &point);
-        int x = MulDiv(point.x, 96, g_app.dpi);
-        int y = MulDiv(point.y, 96, g_app.dpi);
+        int x;
+        int y;
+        wheel_logical_point(lParam, &x, &y);
         int delta = GET_WHEEL_DELTA_WPARAM(wParam);
 
-        ControlId slider = slider_at_point(x, y);
-        if (slider != CONTROL_NONE) {
-            int steps = consume_wheel_steps(WHEEL_TARGET_SLIDER, slider, BELLWIN_TIME_HOURS, delta);
-            if (steps) step_slider(slider, steps, 1);
-            return 0;
-        }
+        if (step_hovered_slider(WHEEL_TARGET_SLIDER, x, y, delta)) return 0;
 
         ControlId timeControl;
         BellwinTimeSegment timeSegment;
@@ -1135,20 +1144,10 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         return 0;
     }
     case WM_MOUSEHWHEEL: {
-        POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        ScreenToClient(window, &point);
-        int x = MulDiv(point.x, 96, g_app.dpi);
-        int y = MulDiv(point.y, 96, g_app.dpi);
-        ControlId slider = slider_at_point(x, y);
-        if (slider != CONTROL_NONE) {
-            int steps = consume_wheel_steps(
-                WHEEL_TARGET_SLIDER_HORIZONTAL,
-                slider,
-                BELLWIN_TIME_HOURS,
-                GET_WHEEL_DELTA_WPARAM(wParam)
-            );
-            if (steps) step_slider(slider, steps, 1);
-        }
+        int x;
+        int y;
+        wheel_logical_point(lParam, &x, &y);
+        step_hovered_slider(WHEEL_TARGET_SLIDER_HORIZONTAL, x, y, GET_WHEEL_DELTA_WPARAM(wParam));
         return 0;
     }
     case WM_SETCURSOR: {
