@@ -22,7 +22,7 @@ BEGIN
             VALUE "FileDescription", "Mindfulness bell"
             VALUE "FileVersion", VER_FILEVERSION_STR
             VALUE "InternalName", "Bellwin"
-            VALUE "LegalCopyright", "Copyright (C) 2025 Vsevolod Kulagin"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Vsevolod Kulagin"
             VALUE "OriginalFilename", "Bellwin.exe"
             VALUE "ProductName", "Bellwin"
             VALUE "ProductVersion", VER_PRODUCTVERSION_STR
