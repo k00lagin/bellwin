@@ -40,6 +40,26 @@ typedef enum ControlId {
     CONTROL_INSTALL,
 } ControlId;
 
+typedef struct TimeEditState {
+    BellwinTimeSegment segment;
+    int digitCount;
+    int firstDigit;
+} TimeEditState;
+
+typedef enum WheelTargetKind {
+    WHEEL_TARGET_NONE,
+    WHEEL_TARGET_SLIDER,
+    WHEEL_TARGET_TIME_SEGMENT,
+    WHEEL_TARGET_TIME_STEPPER,
+} WheelTargetKind;
+
+typedef struct WheelState {
+    WheelTargetKind kind;
+    ControlId control;
+    BellwinTimeSegment segment;
+    int remainder;
+} WheelState;
+
 enum UiGeometry {
     SLIDER_LEFT = 330,
     SLIDER_RIGHT = 565,
@@ -74,9 +94,8 @@ typedef struct AppState {
     int dpi;
     ControlId draggingSlider;
     ControlId focusedControl;
-    BellwinTimeSegment timeSegment;
-    int timeDigitCount;
-    int timeFirstDigit;
+    TimeEditState timeEdit;
+    WheelState wheel;
     int windowFocused;
     int hoverInstall;
     int autoStart;
@@ -502,15 +521,15 @@ static void draw_time_box(HDC dc, ControlId control, int x, int y, int minuteOfD
     RECT hoursRect = logical_rect(x + 6, y + 4, x + 38, y + 36);
     RECT colonRect = logical_rect(x + 38, y + 4, x + 48, y + 36);
     RECT minutesRect = logical_rect(x + 48, y + 4, x + 80, y + 36);
-    RECT *selectedRect = g_app.timeSegment == BELLWIN_TIME_HOURS ? &hoursRect : &minutesRect;
+    RECT *selectedRect = g_app.timeEdit.segment == BELLWIN_TIME_HOURS ? &hoursRect : &minutesRect;
     if (focused) rounded_rect(dc, selectedRect, 3, RGB(0, 120, 212), RGB(0, 120, 212));
 
     wchar_t hoursText[3];
     wchar_t minutesText[3];
     swprintf_s(hoursText, 3, L"%02d", minuteOfDay / 60);
     swprintf_s(minutesText, 3, L"%02d", minuteOfDay % 60);
-    COLORREF hoursColor = focused && g_app.timeSegment == BELLWIN_TIME_HOURS ? RGB(255, 255, 255) : RGB(32, 32, 32);
-    COLORREF minutesColor = focused && g_app.timeSegment == BELLWIN_TIME_MINUTES ? RGB(255, 255, 255) : RGB(32, 32, 32);
+    COLORREF hoursColor = focused && g_app.timeEdit.segment == BELLWIN_TIME_HOURS ? RGB(255, 255, 255) : RGB(32, 32, 32);
+    COLORREF minutesColor = focused && g_app.timeEdit.segment == BELLWIN_TIME_MINUTES ? RGB(255, 255, 255) : RGB(32, 32, 32);
     draw_text(dc, hoursText, hoursRect, g_app.bodyFont, hoursColor, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     draw_text(dc, L":", colonRect, g_app.bodyFont, RGB(32, 32, 32), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     draw_text(dc, minutesText, minutesRect, g_app.bodyFont, minutesColor, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -672,13 +691,46 @@ static int hit_time_segment(int x, int y, ControlId *control, BellwinTimeSegment
     return 0;
 }
 
+static int hit_time_stepper(int x, int y, ControlId *control) {
+    if (y < QUIET_TIME_Y || y >= QUIET_TIME_Y + TIME_BOX_HEIGHT) return 0;
+    ControlId times[] = {CONTROL_QUIET_START, CONTROL_QUIET_END};
+    for (size_t i = 0; i < sizeof(times) / sizeof(times[0]); ++i) {
+        int left = time_x(times[i]);
+        if (x >= left + TIME_STEPPER_X_OFFSET && x < left + TIME_BOX_WIDTH) {
+            *control = times[i];
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int consume_wheel_steps(
+    WheelTargetKind kind,
+    ControlId control,
+    BellwinTimeSegment segment,
+    int delta
+) {
+    if (g_app.wheel.kind != kind
+        || g_app.wheel.control != control
+        || g_app.wheel.segment != segment) {
+        g_app.wheel.kind = kind;
+        g_app.wheel.control = control;
+        g_app.wheel.segment = segment;
+        g_app.wheel.remainder = 0;
+    }
+    g_app.wheel.remainder += delta;
+    int steps = g_app.wheel.remainder / WHEEL_DELTA;
+    g_app.wheel.remainder -= steps * WHEEL_DELTA;
+    return steps;
+}
+
 static void focus_control(ControlId control) {
     if (control == CONTROL_INSTALL && !g_app.showInstall) control = CONTROL_AUTOSTART;
     if (GetFocus() != g_app.window) SetFocus(g_app.window);
     if (g_app.focusedControl != control) {
         g_app.focusedControl = control;
-        g_app.timeDigitCount = 0;
-        if (is_time_control(control)) g_app.timeSegment = BELLWIN_TIME_HOURS;
+        g_app.timeEdit.digitCount = 0;
+        if (is_time_control(control)) g_app.timeEdit.segment = BELLWIN_TIME_HOURS;
     }
     InvalidateRect(g_app.window, NULL, FALSE);
 }
@@ -760,25 +812,32 @@ static void set_time_value(ControlId control, int value) {
 }
 
 static void step_time_value(ControlId control, BellwinTimeSegment segment, int delta) {
-    g_app.timeDigitCount = 0;
+    if (g_app.focusedControl == control && g_app.timeEdit.segment == segment) {
+        g_app.timeEdit.digitCount = 0;
+    }
     set_time_value(control, bellwin_step_time_segment(*time_value(control), segment, delta));
+}
+
+static void shift_time_minutes(ControlId control, int deltaMinutes) {
+    if (g_app.focusedControl == control) g_app.timeEdit.digitCount = 0;
+    set_time_value(control, *time_value(control) + deltaMinutes);
 }
 
 static void enter_time_digit(int digit) {
     if (!is_time_control(g_app.focusedControl)) return;
     int value;
-    if (g_app.timeDigitCount == 0) {
-        g_app.timeFirstDigit = digit;
-        g_app.timeDigitCount = 1;
+    if (g_app.timeEdit.digitCount == 0) {
+        g_app.timeEdit.firstDigit = digit;
+        g_app.timeEdit.digitCount = 1;
         value = digit;
     } else {
-        value = g_app.timeFirstDigit * 10 + digit;
-        g_app.timeDigitCount = 0;
+        value = g_app.timeEdit.firstDigit * 10 + digit;
+        g_app.timeEdit.digitCount = 0;
     }
-    int updated = bellwin_set_time_segment(*time_value(g_app.focusedControl), g_app.timeSegment, value);
+    int updated = bellwin_set_time_segment(*time_value(g_app.focusedControl), g_app.timeEdit.segment, value);
     set_time_value(g_app.focusedControl, updated);
-    if (g_app.timeDigitCount == 0 && g_app.timeSegment == BELLWIN_TIME_HOURS) {
-        g_app.timeSegment = BELLWIN_TIME_MINUTES;
+    if (g_app.timeEdit.digitCount == 0 && g_app.timeEdit.segment == BELLWIN_TIME_HOURS) {
+        g_app.timeEdit.segment = BELLWIN_TIME_MINUTES;
         InvalidateRect(g_app.window, NULL, FALSE);
     }
 }
@@ -859,7 +918,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         return 0;
     case WM_KILLFOCUS:
         g_app.windowFocused = 0;
-        g_app.timeDigitCount = 0;
+        g_app.timeEdit.digitCount = 0;
         InvalidateRect(window, NULL, FALSE);
         return 0;
     case WM_DPICHANGED: {
@@ -891,20 +950,16 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         BellwinTimeSegment timeSegment;
         if (hit_time_segment(x, y, &timeControl, &timeSegment)) {
             focus_control(timeControl);
-            g_app.timeSegment = timeSegment;
-            g_app.timeDigitCount = 0;
+            g_app.timeEdit.segment = timeSegment;
+            g_app.timeEdit.digitCount = 0;
             InvalidateRect(window, NULL, FALSE);
             return 0;
         }
 
-        ControlId timeControls[] = {CONTROL_QUIET_START, CONTROL_QUIET_END};
-        for (size_t i = 0; i < sizeof(timeControls) / sizeof(timeControls[0]); ++i) {
-            int left = time_x(timeControls[i]);
-            if (point_in(x, y, left + TIME_STEPPER_X_OFFSET, QUIET_TIME_Y, left + TIME_BOX_WIDTH, QUIET_TIME_Y + TIME_BOX_HEIGHT)) {
-                focus_control(timeControls[i]);
-                step_time_value(timeControls[i], g_app.timeSegment, y < QUIET_TIME_Y + TIME_BOX_HEIGHT / 2 ? 1 : -1);
-                return 0;
-            }
+        if (hit_time_stepper(x, y, &timeControl)) {
+            focus_control(timeControl);
+            shift_time_minutes(timeControl, y < QUIET_TIME_Y + TIME_BOX_HEIGHT / 2 ? 30 : -30);
+            return 0;
         }
 
         if (point_in(x, y, TOGGLE_X, TOGGLE_Y, TOGGLE_X + 54, TOGGLE_Y + 30)) {
@@ -944,33 +999,27 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         ScreenToClient(window, &point);
         int x = MulDiv(point.x, 96, g_app.dpi);
         int y = MulDiv(point.y, 96, g_app.dpi);
-        int steps = GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
-        if (steps == 0) steps = GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 1 : -1;
+        int delta = GET_WHEEL_DELTA_WPARAM(wParam);
 
         ControlId slider = slider_at_point(x, y);
         if (slider != CONTROL_NONE) {
-            focus_control(slider);
-            step_slider(slider, steps, 1);
+            int steps = consume_wheel_steps(WHEEL_TARGET_SLIDER, slider, BELLWIN_TIME_HOURS, delta);
+            if (steps) step_slider(slider, steps, 1);
             return 0;
         }
 
         ControlId timeControl;
         BellwinTimeSegment timeSegment;
         if (hit_time_segment(x, y, &timeControl, &timeSegment)) {
-            focus_control(timeControl);
-            g_app.timeSegment = timeSegment;
-            step_time_value(timeControl, timeSegment, steps);
+            int steps = consume_wheel_steps(WHEEL_TARGET_TIME_SEGMENT, timeControl, timeSegment, delta);
+            if (steps) step_time_value(timeControl, timeSegment, steps);
             return 0;
         }
 
-        ControlId timeControls[] = {CONTROL_QUIET_START, CONTROL_QUIET_END};
-        for (size_t i = 0; i < sizeof(timeControls) / sizeof(timeControls[0]); ++i) {
-            int left = time_x(timeControls[i]);
-            if (point_in(x, y, left + TIME_STEPPER_X_OFFSET, QUIET_TIME_Y, left + TIME_BOX_WIDTH, QUIET_TIME_Y + TIME_BOX_HEIGHT)) {
-                focus_control(timeControls[i]);
-                step_time_value(timeControls[i], g_app.timeSegment, steps);
-                return 0;
-            }
+        if (hit_time_stepper(x, y, &timeControl)) {
+            int steps = consume_wheel_steps(WHEEL_TARGET_TIME_STEPPER, timeControl, BELLWIN_TIME_MINUTES, delta);
+            if (steps) shift_time_minutes(timeControl, steps * 30);
+            return 0;
         }
         return 0;
     }
@@ -986,10 +1035,10 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
             SetCursor(LoadCursorW(NULL, IDC_IBEAM));
             return TRUE;
         }
+        int overTimeStepper = hit_time_stepper(x, y, &timeControl);
         if (point_in(x, y, TOGGLE_X, TOGGLE_Y, TOGGLE_X + 54, TOGGLE_Y + 30)
             || (g_app.showInstall && point_in(x, y, INSTALL_LEFT, INSTALL_TOP, INSTALL_RIGHT, INSTALL_BOTTOM))
-            || point_in(x, y, QUIET_START_X + TIME_STEPPER_X_OFFSET, QUIET_TIME_Y, QUIET_START_X + TIME_BOX_WIDTH, QUIET_TIME_Y + TIME_BOX_HEIGHT)
-            || point_in(x, y, QUIET_END_X + TIME_STEPPER_X_OFFSET, QUIET_TIME_Y, QUIET_END_X + TIME_BOX_WIDTH, QUIET_TIME_Y + TIME_BOX_HEIGHT)) {
+            || overTimeStepper) {
             SetCursor(LoadCursorW(NULL, IDC_HAND));
             return TRUE;
         }
@@ -1037,7 +1086,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
             return 0;
         }
         if ((wParam == VK_UP || wParam == VK_DOWN) && is_time_control(g_app.focusedControl)) {
-            step_time_value(g_app.focusedControl, g_app.timeSegment, wParam == VK_UP ? 1 : -1);
+            step_time_value(g_app.focusedControl, g_app.timeEdit.segment, wParam == VK_UP ? 1 : -1);
             return 0;
         }
         if ((wParam == VK_SPACE || wParam == VK_RETURN) && !(lParam & (1L << 30))) {
