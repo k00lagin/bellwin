@@ -8,7 +8,12 @@ All settings controls support keyboard focus with `Tab` and `Shift+Tab`.
 Focused sliders use the left/right arrows, the switch and install button use
 `Space` or `Enter`, and the selected hour/minute pair can be typed directly or
 changed with the up/down arrows. Sliders and individual time pairs also react
-to the mouse wheel while hovered.
+to the mouse wheel while hovered. Sliders additionally react to horizontal
+touchpad scrolling.
+
+Mouse clicks keep keyboard focus without drawing a focus outline. Using the
+keyboard reveals the outline, while time inputs use the selected digit pair as
+their focus indication.
 
 Left-clicking the tray icon opens Settings. Its context menu can ring the bell
 immediately, pause ringing for 30 minutes, 1 hour, or 2 hours, toggle an

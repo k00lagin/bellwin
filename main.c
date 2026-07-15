@@ -53,9 +53,15 @@ typedef struct TimeEditState {
 typedef enum WheelTargetKind {
     WHEEL_TARGET_NONE,
     WHEEL_TARGET_SLIDER,
+    WHEEL_TARGET_SLIDER_HORIZONTAL,
     WHEEL_TARGET_TIME_SEGMENT,
     WHEEL_TARGET_TIME_STEPPER,
 } WheelTargetKind;
+
+typedef enum FocusVisibility {
+    FOCUS_HIDDEN,
+    FOCUS_VISIBLE,
+} FocusVisibility;
 
 typedef struct WheelState {
     WheelTargetKind kind;
@@ -122,6 +128,7 @@ typedef struct AppState {
     int dpi;
     ControlId draggingSlider;
     ControlId focusedControl;
+    FocusVisibility focusVisibility;
     TimeEditState timeEdit;
     WheelState wheel;
     int windowFocused;
@@ -507,6 +514,12 @@ static void draw_focus_outline(HDC dc, const RECT *rect, int radius) {
 }
 
 static int control_has_visible_focus(ControlId control) {
+    return g_app.windowFocused
+        && g_app.focusVisibility == FOCUS_VISIBLE
+        && g_app.focusedControl == control;
+}
+
+static int control_has_focus(ControlId control) {
     return g_app.windowFocused && g_app.focusedControl == control;
 }
 
@@ -573,8 +586,8 @@ static void draw_triangle(HDC dc, POINT points[3], COLORREF color) {
 
 static void draw_time_box(HDC dc, ControlId control, int x, int y, int minuteOfDay) {
     RECT box = logical_rect(x, y, x + 110, y + 40);
-    int focused = control_has_visible_focus(control);
-    rounded_rect(dc, &box, 3, RGB(255, 255, 255), focused ? RGB(0, 95, 184) : RGB(194, 196, 200));
+    int focused = control_has_focus(control);
+    rounded_rect(dc, &box, 3, RGB(255, 255, 255), RGB(194, 196, 200));
 
     RECT hoursRect = logical_rect(x + 6, y + 4, x + 38, y + 36);
     RECT colonRect = logical_rect(x + 38, y + 4, x + 48, y + 36);
@@ -605,7 +618,6 @@ static void draw_time_box(HDC dc, ControlId control, int x, int y, int minuteOfD
     POINT down[3] = {{px(x + 91), px(y + 26)}, {px(x + 97), px(y + 32)}, {px(x + 103), px(y + 26)}};
     draw_triangle(dc, up, RGB(80, 80, 80));
     draw_triangle(dc, down, RGB(80, 80, 80));
-    if (focused) draw_focus_outline(dc, &box, 3);
 }
 
 static void draw_toggle(HDC dc, int x, int y, int on) {
@@ -782,9 +794,16 @@ static int consume_wheel_steps(
     return steps;
 }
 
-static void focus_control(ControlId control) {
+static void set_focus_visibility(FocusVisibility visibility) {
+    if (g_app.focusVisibility == visibility) return;
+    g_app.focusVisibility = visibility;
+    InvalidateRect(g_app.window, NULL, FALSE);
+}
+
+static void focus_control(ControlId control, FocusVisibility visibility) {
     if (control == CONTROL_INSTALL && !g_app.showInstall) control = CONTROL_AUTOSTART;
     if (GetFocus() != g_app.window) SetFocus(g_app.window);
+    g_app.focusVisibility = visibility;
     if (g_app.focusedControl != control) {
         g_app.focusedControl = control;
         g_app.timeEdit.digitCount = 0;
@@ -801,7 +820,7 @@ static void move_focus(int direction) {
     current += direction;
     if (current > last) current = first;
     if (current < first) current = last;
-    focus_control((ControlId)current);
+    focus_control((ControlId)current, FOCUS_VISIBLE);
 }
 
 static int slider_value_from_x(ControlId slider, int x) {
@@ -917,7 +936,9 @@ static void activate_install(void) {
     } else {
         MessageBoxW(g_app.window, L"Bellwin could not be installed.", APP_NAME, MB_OK | MB_ICONERROR);
     }
-    if (!g_app.showInstall && g_app.focusedControl == CONTROL_INSTALL) focus_control(CONTROL_AUTOSTART);
+    if (!g_app.showInstall && g_app.focusedControl == CONTROL_INSTALL) {
+        focus_control(CONTROL_AUTOSTART, g_app.focusVisibility);
+    }
 }
 
 static void add_tray_icon(void) {
@@ -1023,10 +1044,11 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         int x = logical_x(lParam);
         int y = logical_y(lParam);
         SetFocus(window);
+        set_focus_visibility(FOCUS_HIDDEN);
 
         ControlId slider = slider_at_point(x, y);
         if (slider != CONTROL_NONE) {
-            focus_control(slider);
+            focus_control(slider, FOCUS_HIDDEN);
             if (x >= SLIDER_LEFT - 10 && x < SLIDER_RIGHT + 10) {
                 g_app.draggingSlider = slider;
                 SetCapture(window);
@@ -1038,7 +1060,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         ControlId timeControl;
         BellwinTimeSegment timeSegment;
         if (hit_time_segment(x, y, &timeControl, &timeSegment)) {
-            focus_control(timeControl);
+            focus_control(timeControl, FOCUS_HIDDEN);
             g_app.timeEdit.segment = timeSegment;
             g_app.timeEdit.digitCount = 0;
             InvalidateRect(window, NULL, FALSE);
@@ -1046,18 +1068,18 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         }
 
         if (hit_time_stepper(x, y, &timeControl)) {
-            focus_control(timeControl);
+            focus_control(timeControl, FOCUS_HIDDEN);
             shift_time_minutes(timeControl, y < QUIET_TIME_Y + TIME_BOX_HEIGHT / 2 ? 30 : -30);
             return 0;
         }
 
         if (point_in(x, y, TOGGLE_X, TOGGLE_Y, TOGGLE_X + 54, TOGGLE_Y + 30)) {
-            focus_control(CONTROL_AUTOSTART);
+            focus_control(CONTROL_AUTOSTART, FOCUS_HIDDEN);
             activate_autostart();
             return 0;
         }
         if (g_app.showInstall && point_in(x, y, INSTALL_LEFT, INSTALL_TOP, INSTALL_RIGHT, INSTALL_BOTTOM)) {
-            focus_control(CONTROL_INSTALL);
+            focus_control(CONTROL_INSTALL, FOCUS_HIDDEN);
             activate_install();
             return 0;
         }
@@ -1109,6 +1131,23 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
             int steps = consume_wheel_steps(WHEEL_TARGET_TIME_STEPPER, timeControl, BELLWIN_TIME_MINUTES, delta);
             if (steps) shift_time_minutes(timeControl, steps * 30);
             return 0;
+        }
+        return 0;
+    }
+    case WM_MOUSEHWHEEL: {
+        POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        ScreenToClient(window, &point);
+        int x = MulDiv(point.x, 96, g_app.dpi);
+        int y = MulDiv(point.y, 96, g_app.dpi);
+        ControlId slider = slider_at_point(x, y);
+        if (slider != CONTROL_NONE) {
+            int steps = consume_wheel_steps(
+                WHEEL_TARGET_SLIDER_HORIZONTAL,
+                slider,
+                BELLWIN_TIME_HOURS,
+                GET_WHEEL_DELTA_WPARAM(wParam)
+            );
+            if (steps) step_slider(slider, steps, 1);
         }
         return 0;
     }
@@ -1191,6 +1230,9 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         show_window();
         return 0;
     case WM_KEYDOWN:
+        if (wParam != VK_ESCAPE && g_app.focusedControl != CONTROL_NONE) {
+            set_focus_visibility(FOCUS_VISIBLE);
+        }
         if (wParam == VK_TAB) {
             move_focus((GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1);
             return 0;
