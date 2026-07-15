@@ -16,6 +16,10 @@ typedef enum BellwinTimeSegment {
     BELLWIN_TIME_MINUTES,
 } BellwinTimeSegment;
 
+static BellwinTimeSegment bellwin_next_time_segment(BellwinTimeSegment segment) {
+    return segment == BELLWIN_TIME_HOURS ? BELLWIN_TIME_MINUTES : BELLWIN_TIME_HOURS;
+}
+
 static int bellwin_clamp_int(int value, int minimum, int maximum) {
     if (value < minimum) return minimum;
     if (value > maximum) return maximum;

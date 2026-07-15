@@ -1246,7 +1246,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
             return 0;
         }
         if ((wParam == VK_LEFT || wParam == VK_RIGHT) && is_time_control(g_app.focusedControl)) {
-            g_app.timeEdit.segment = wParam == VK_LEFT ? BELLWIN_TIME_HOURS : BELLWIN_TIME_MINUTES;
+            g_app.timeEdit.segment = bellwin_next_time_segment(g_app.timeEdit.segment);
             g_app.timeEdit.digitCount = 0;
             InvalidateRect(window, NULL, FALSE);
             return 0;
