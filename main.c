@@ -1124,7 +1124,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         int x;
         int y;
         wheel_logical_point(lParam, &x, &y);
-        int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        int delta = -GET_WHEEL_DELTA_WPARAM(wParam);
 
         if (step_hovered_slider(WHEEL_TARGET_SLIDER, x, y, delta)) return 0;
 
@@ -1147,7 +1147,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         int x;
         int y;
         wheel_logical_point(lParam, &x, &y);
-        step_hovered_slider(WHEEL_TARGET_SLIDER_HORIZONTAL, x, y, GET_WHEEL_DELTA_WPARAM(wParam));
+        step_hovered_slider(WHEEL_TARGET_SLIDER_HORIZONTAL, x, y, -GET_WHEEL_DELTA_WPARAM(wParam));
         return 0;
     }
     case WM_SETCURSOR: {
@@ -1238,6 +1238,12 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         }
         if ((wParam == VK_LEFT || wParam == VK_RIGHT) && is_slider_control(g_app.focusedControl)) {
             step_slider(g_app.focusedControl, wParam == VK_RIGHT ? 1 : -1, 0);
+            return 0;
+        }
+        if ((wParam == VK_LEFT || wParam == VK_RIGHT) && is_time_control(g_app.focusedControl)) {
+            g_app.timeEdit.segment = wParam == VK_LEFT ? BELLWIN_TIME_HOURS : BELLWIN_TIME_MINUTES;
+            g_app.timeEdit.digitCount = 0;
+            InvalidateRect(window, NULL, FALSE);
             return 0;
         }
         if ((wParam == VK_UP || wParam == VK_DOWN) && is_time_control(g_app.focusedControl)) {

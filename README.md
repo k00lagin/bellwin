@@ -9,11 +9,12 @@ Focused sliders use the left/right arrows, the switch and install button use
 `Space` or `Enter`, and the selected hour/minute pair can be typed directly or
 changed with the up/down arrows. Sliders and individual time pairs also react
 to the mouse wheel while hovered. Sliders additionally react to horizontal
-touchpad scrolling.
+touchpad scrolling. An upward or rightward gesture increases the hovered
+value; a downward or leftward gesture decreases it.
 
 Mouse clicks keep keyboard focus without drawing a focus outline. Using the
 keyboard reveals the outline, while time inputs use the selected digit pair as
-their focus indication.
+their focus indication. Left/right arrows select the hours/minutes pair.
 
 Left-clicking the tray icon opens Settings. Its context menu can ring the bell
 immediately, pause ringing for 30 minutes, 1 hour, or 2 hours, toggle an
