@@ -64,6 +64,30 @@ typedef struct WheelState {
     int remainder;
 } WheelState;
 
+typedef enum PauseMode {
+    PAUSE_NONE,
+    PAUSE_TIMED,
+    PAUSE_INDEFINITE,
+} PauseMode;
+
+typedef struct PauseState {
+    PauseMode mode;
+    ULONGLONG untilTick;
+    int selectedMinutes;
+} PauseState;
+
+typedef struct PauseDuration {
+    UINT command;
+    int minutes;
+    const wchar_t *label;
+} PauseDuration;
+
+static const PauseDuration PAUSE_DURATIONS[] = {
+    {CMD_TRAY_PAUSE_30_MINUTES, 30, L"30 minutes"},
+    {CMD_TRAY_PAUSE_1_HOUR, 60, L"1 hour"},
+    {CMD_TRAY_PAUSE_2_HOURS, 120, L"2 hours"},
+};
+
 enum UiGeometry {
     SLIDER_LEFT = 330,
     SLIDER_RIGHT = 565,
@@ -107,9 +131,7 @@ typedef struct AppState {
     int updateAvailable;
     int exiting;
     ULONGLONG nextBellTick;
-    ULONGLONG pauseUntilTick;
-    int pauseIndefinitely;
-    int timedPauseMinutes;
+    PauseState pause;
     wchar_t appDataDirectory[MAX_PATH];
     wchar_t settingsPath[MAX_PATH];
     wchar_t soundPath[MAX_PATH];
@@ -280,21 +302,29 @@ static void schedule_next_bell(void) {
     g_app.nextBellTick = GetTickCount64() + (ULONGLONG)(delay + quietWait) * 60ULL * 1000ULL;
 }
 
+static int pause_is_active(ULONGLONG now) {
+    return bellwin_pause_is_active(now, g_app.pause.untilTick, g_app.pause.mode == PAUSE_INDEFINITE);
+}
+
+static const wchar_t *tray_tip_text(void) {
+    return pause_is_active(GetTickCount64()) ? L"Bellwin — paused" : L"Bellwin — mindfulness bell";
+}
+
 static void pause_for_minutes(int minutes) {
-    g_app.pauseIndefinitely = 0;
-    g_app.timedPauseMinutes = minutes;
-    g_app.pauseUntilTick = GetTickCount64() + (ULONGLONG)minutes * 60ULL * 1000ULL;
+    g_app.pause.mode = PAUSE_TIMED;
+    g_app.pause.selectedMinutes = minutes;
+    g_app.pause.untilTick = GetTickCount64() + (ULONGLONG)minutes * 60ULL * 1000ULL;
     update_tray_tip();
 }
 
 static void toggle_indefinite_pause(void) {
-    if (g_app.pauseIndefinitely) {
-        g_app.pauseIndefinitely = 0;
+    if (g_app.pause.mode == PAUSE_INDEFINITE) {
+        ZeroMemory(&g_app.pause, sizeof(g_app.pause));
         schedule_next_bell();
     } else {
-        g_app.pauseIndefinitely = 1;
-        g_app.pauseUntilTick = 0;
-        g_app.timedPauseMinutes = 0;
+        g_app.pause.mode = PAUSE_INDEFINITE;
+        g_app.pause.untilTick = 0;
+        g_app.pause.selectedMinutes = 0;
     }
     update_tray_tip();
 }
@@ -898,10 +928,7 @@ static void add_tray_icon(void) {
     g_app.tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_app.tray.uCallbackMessage = WM_TRAY;
     g_app.tray.hIcon = g_app.smallIcon;
-    wcscpy_s(g_app.tray.szTip, sizeof(g_app.tray.szTip) / sizeof(g_app.tray.szTip[0]),
-        bellwin_pause_is_active(GetTickCount64(), g_app.pauseUntilTick, g_app.pauseIndefinitely)
-            ? L"Bellwin — paused"
-            : L"Bellwin — mindfulness bell");
+    wcscpy_s(g_app.tray.szTip, sizeof(g_app.tray.szTip) / sizeof(g_app.tray.szTip[0]), tray_tip_text());
     Shell_NotifyIconW(NIM_ADD, &g_app.tray);
     g_app.tray.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &g_app.tray);
@@ -911,10 +938,7 @@ static void update_tray_tip(void) {
     if (!g_app.tray.cbSize) return;
     NOTIFYICONDATAW update = g_app.tray;
     update.uFlags = NIF_TIP;
-    wcscpy_s(update.szTip, sizeof(update.szTip) / sizeof(update.szTip[0]),
-        bellwin_pause_is_active(GetTickCount64(), g_app.pauseUntilTick, g_app.pauseIndefinitely)
-            ? L"Bellwin — paused"
-            : L"Bellwin — mindfulness bell");
+    wcscpy_s(update.szTip, sizeof(update.szTip) / sizeof(update.szTip[0]), tray_tip_text());
     Shell_NotifyIconW(NIM_MODIFY, &update);
 }
 
@@ -941,24 +965,20 @@ static void show_tray_menu(void) {
     }
 
     ULONGLONG now = GetTickCount64();
-    int timedPauseActive = g_app.pauseUntilTick != 0
-        && bellwin_pause_is_active(now, g_app.pauseUntilTick, 0);
-    AppendMenuW(pauseMenu,
-        MF_STRING | (timedPauseActive && g_app.timedPauseMinutes == 30 ? MF_CHECKED : MF_UNCHECKED),
-        CMD_TRAY_PAUSE_30_MINUTES, L"30 minutes");
-    AppendMenuW(pauseMenu,
-        MF_STRING | (timedPauseActive && g_app.timedPauseMinutes == 60 ? MF_CHECKED : MF_UNCHECKED),
-        CMD_TRAY_PAUSE_1_HOUR, L"1 hour");
-    AppendMenuW(pauseMenu,
-        MF_STRING | (timedPauseActive && g_app.timedPauseMinutes == 120 ? MF_CHECKED : MF_UNCHECKED),
-        CMD_TRAY_PAUSE_2_HOURS, L"2 hours");
+    int timedPauseActive = g_app.pause.mode == PAUSE_TIMED && pause_is_active(now);
+    for (size_t index = 0; index < sizeof(PAUSE_DURATIONS) / sizeof(PAUSE_DURATIONS[0]); ++index) {
+        const PauseDuration *duration = &PAUSE_DURATIONS[index];
+        AppendMenuW(pauseMenu,
+            MF_STRING | (timedPauseActive && g_app.pause.selectedMinutes == duration->minutes ? MF_CHECKED : MF_UNCHECKED),
+            duration->command, duration->label);
+    }
 
     AppendMenuW(menu, MF_STRING, CMD_TRAY_SHOW, L"Settings");
     AppendMenuW(menu, MF_STRING, CMD_TRAY_RING, L"Ring now");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)pauseMenu, L"Pause for");
     AppendMenuW(menu,
-        MF_STRING | (g_app.pauseIndefinitely ? MF_CHECKED : MF_UNCHECKED),
+        MF_STRING | (g_app.pause.mode == PAUSE_INDEFINITE ? MF_CHECKED : MF_UNCHECKED),
         CMD_TRAY_PAUSE_INDEFINITELY, L"Pause indefinitely");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, CMD_TRAY_EXIT, L"Exit");
@@ -1116,11 +1136,10 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
     case WM_TIMER:
         if (wParam == TIMER_SCHEDULE) {
             ULONGLONG now = GetTickCount64();
-            if (g_app.pauseIndefinitely) return 0;
-            if (g_app.pauseUntilTick) {
-                if (bellwin_pause_is_active(now, g_app.pauseUntilTick, 0)) return 0;
-                g_app.pauseUntilTick = 0;
-                g_app.timedPauseMinutes = 0;
+            if (g_app.pause.mode == PAUSE_INDEFINITE) return 0;
+            if (g_app.pause.mode == PAUSE_TIMED) {
+                if (pause_is_active(now)) return 0;
+                ZeroMemory(&g_app.pause, sizeof(g_app.pause));
                 update_tray_tip();
                 schedule_next_bell();
                 return 0;
@@ -1143,6 +1162,12 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         return 0;
     }
     case WM_COMMAND:
+        for (size_t index = 0; index < sizeof(PAUSE_DURATIONS) / sizeof(PAUSE_DURATIONS[0]); ++index) {
+            if (LOWORD(wParam) == PAUSE_DURATIONS[index].command) {
+                pause_for_minutes(PAUSE_DURATIONS[index].minutes);
+                return 0;
+            }
+        }
         switch (LOWORD(wParam)) {
         case CMD_TRAY_SHOW:
             show_window();
@@ -1150,15 +1175,6 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         case CMD_TRAY_RING:
             play_bell();
             schedule_next_bell();
-            return 0;
-        case CMD_TRAY_PAUSE_30_MINUTES:
-            pause_for_minutes(30);
-            return 0;
-        case CMD_TRAY_PAUSE_1_HOUR:
-            pause_for_minutes(60);
-            return 0;
-        case CMD_TRAY_PAUSE_2_HOURS:
-            pause_for_minutes(120);
             return 0;
         case CMD_TRAY_PAUSE_INDEFINITELY:
             toggle_indefinite_pause();
