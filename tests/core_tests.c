@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "../core.h"
+#include "../rendering.h"
 
 static void test_overnight_quiet_hours(void) {
     assert(bellwin_is_quiet(22 * 60, 22 * 60, 10 * 60));
@@ -70,6 +71,33 @@ static void test_pause_state(void) {
     assert(bellwin_pause_is_active(3000, 2000, 1));
 }
 
+static void test_antialiased_circle_coverage(void) {
+    BellwinCircleCoverage center = bellwin_circle_coverage(9, 9, 10, 10, 10, 3);
+    assert(center.fill == BELLWIN_AA_SAMPLE_COUNT);
+    assert(center.border == 0);
+
+    BellwinCircleCoverage edge = bellwin_circle_coverage(0, 9, 10, 10, 10, 3);
+    assert(edge.fill == 0);
+    assert(edge.border == BELLWIN_AA_SAMPLE_COUNT);
+
+    BellwinCircleCoverage corner = bellwin_circle_coverage(0, 0, 10, 10, 10, 3);
+    assert(corner.fill == 0);
+    assert(corner.border == 0);
+
+    BellwinCircleCoverage partial = bellwin_circle_coverage(1, 4, 10, 10, 10, 3);
+    assert(partial.fill == 0);
+    assert(partial.border > 0);
+    assert(partial.border < BELLWIN_AA_SAMPLE_COUNT);
+
+    BellwinCircleCoverage mirror = bellwin_circle_coverage(18, 4, 10, 10, 10, 3);
+    assert(partial.fill == mirror.fill);
+    assert(partial.border == mirror.border);
+
+    BellwinCircleCoverage fillOnly = bellwin_circle_coverage(1, 4, 10, 10, 10, 0);
+    assert(fillOnly.fill == partial.border);
+    assert(fillOnly.border == 0);
+}
+
 int main(void) {
     test_overnight_quiet_hours();
     test_daytime_quiet_hours();
@@ -80,6 +108,7 @@ int main(void) {
     test_time_segment_stepping_wraps_only_selected_pair();
     test_time_segment_selection_cycles();
     test_pause_state();
+    test_antialiased_circle_coverage();
     puts("core tests passed");
     return 0;
 }

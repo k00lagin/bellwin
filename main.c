@@ -13,6 +13,7 @@
 #include <wchar.h>
 
 #include "core.h"
+#include "rendering.h"
 #include "resource.h"
 #include "version.h"
 
@@ -529,7 +530,71 @@ static int control_has_focus(ControlId control) {
     return g_app.windowFocused && g_app.focusedControl == control;
 }
 
-static void draw_slider(HDC dc, ControlId control, int y, int value, int minimum, int maximum, int ticks, const wchar_t *valueText) {
+typedef struct PixelSurface {
+    uint32_t *pixels;
+    int width;
+    int height;
+} PixelSurface;
+
+static unsigned blend_circle_channel(
+    unsigned background,
+    unsigned fill,
+    unsigned border,
+    BellwinCircleCoverage coverage
+) {
+    unsigned outside = BELLWIN_AA_SAMPLE_COUNT - coverage.fill - coverage.border;
+    return (
+        background * outside + fill * coverage.fill + border * coverage.border
+        + BELLWIN_AA_SAMPLE_COUNT / 2
+    ) / BELLWIN_AA_SAMPLE_COUNT;
+}
+
+static void draw_antialiased_circle(
+    PixelSurface *surface,
+    int centerX,
+    int centerY,
+    int radius,
+    int borderWidth,
+    COLORREF fill,
+    COLORREF border
+) {
+    if (!surface->pixels || radius <= 0) return;
+
+    int left = centerX - radius;
+    int top = centerY - radius;
+    int right = centerX + radius;
+    int bottom = centerY + radius;
+    if (left < 0) left = 0;
+    if (top < 0) top = 0;
+    if (right > surface->width) right = surface->width;
+    if (bottom > surface->height) bottom = surface->height;
+
+    /* Finish pending GDI writes before reading and blending DIB pixels. */
+    GdiFlush();
+    for (int y = top; y < bottom; ++y) {
+        for (int x = left; x < right; ++x) {
+            BellwinCircleCoverage coverage = bellwin_circle_coverage(
+                x, y, centerX, centerY, radius, borderWidth
+            );
+            if (coverage.fill == 0 && coverage.border == 0) continue;
+
+            uint32_t background = surface->pixels[y * surface->width + x];
+            unsigned red = blend_circle_channel(
+                (background >> 16) & 0xff, GetRValue(fill), GetRValue(border), coverage
+            );
+            unsigned green = blend_circle_channel(
+                (background >> 8) & 0xff, GetGValue(fill), GetGValue(border), coverage
+            );
+            unsigned blue = blend_circle_channel(
+                background & 0xff, GetBValue(fill), GetBValue(border), coverage
+            );
+            surface->pixels[y * surface->width + x] =
+                (background & 0xff000000) | (red << 16) | (green << 8) | blue;
+        }
+    }
+}
+
+static void draw_slider(PixelSurface *surface, HDC dc, ControlId control, int y, int value, int minimum, int maximum, int ticks, const wchar_t *valueText) {
     const int left = SLIDER_LEFT;
     const int right = SLIDER_RIGHT;
     int position = left + MulDiv(value - minimum, right - left, maximum - minimum);
@@ -550,15 +615,15 @@ static void draw_slider(HDC dc, ControlId control, int y, int value, int minimum
         DeleteObject(tickPen);
     }
 
-    HBRUSH knobBrush = CreateSolidBrush(RGB(255, 255, 255));
-    HPEN knobPen = CreatePen(PS_SOLID, px(3), RGB(0, 120, 212));
-    HGDIOBJ oldBrush = SelectObject(dc, knobBrush);
-    HGDIOBJ oldPen = SelectObject(dc, knobPen);
-    Ellipse(dc, px(position - 10), px(y - 10), px(position + 10), px(y + 10));
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(knobBrush);
-    DeleteObject(knobPen);
+    draw_antialiased_circle(
+        surface,
+        px(position),
+        px(y),
+        px(10),
+        px(3),
+        RGB(255, 255, 255),
+        RGB(0, 120, 212)
+    );
 
     RECT valueRect = logical_rect(590, y - 20, 690, y + 20);
     draw_text(dc, valueText, valueRect, g_app.bodyFont, RGB(96, 96, 96), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -626,19 +691,19 @@ static void draw_time_box(HDC dc, ControlId control, int x, int y, int minuteOfD
     draw_triangle(dc, down, RGB(80, 80, 80));
 }
 
-static void draw_toggle(HDC dc, int x, int y, int on) {
+static void draw_toggle(PixelSurface *surface, HDC dc, int x, int y, int on) {
     RECT track = logical_rect(x, y, x + 54, y + 30);
     rounded_rect(dc, &track, 30, on ? RGB(0, 120, 212) : RGB(145, 149, 154), on ? RGB(0, 120, 212) : RGB(145, 149, 154));
     int knobX = on ? x + 39 : x + 15;
-    HBRUSH brush = CreateSolidBrush(RGB(255, 255, 255));
-    HPEN pen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
-    HGDIOBJ oldBrush = SelectObject(dc, brush);
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    Ellipse(dc, px(knobX - 11), px(y + 4), px(knobX + 11), px(y + 26));
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(brush);
-    DeleteObject(pen);
+    draw_antialiased_circle(
+        surface,
+        px(knobX),
+        px(y + 15),
+        px(11),
+        0,
+        RGB(255, 255, 255),
+        RGB(255, 255, 255)
+    );
     if (control_has_visible_focus(CONTROL_AUTOSTART)) {
         RECT focus = logical_rect(x - 5, y - 5, x + 59, y + 35);
         draw_focus_outline(dc, &focus, 20);
@@ -667,8 +732,23 @@ static void paint_ui(HWND window) {
     RECT client;
     GetClientRect(window, &client);
     HDC dc = CreateCompatibleDC(target);
-    HBITMAP bitmap = CreateCompatibleBitmap(target, client.right, client.bottom);
+    BITMAPINFO bitmapInfo = {0};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = client.right;
+    bitmapInfo.bmiHeader.biHeight = -client.bottom;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+    void *bitmapPixels = NULL;
+    HBITMAP bitmap = CreateDIBSection(
+        target, &bitmapInfo, DIB_RGB_COLORS, &bitmapPixels, NULL, 0
+    );
     HGDIOBJ oldBitmap = SelectObject(dc, bitmap);
+    PixelSurface surface = {
+        .pixels = bitmapPixels,
+        .width = client.right,
+        .height = client.bottom,
+    };
 
     fill_rect_color(dc, &client, RGB(243, 243, 243));
 
@@ -687,11 +767,11 @@ static void paint_ui(HWND window) {
 
     wchar_t valueText[32];
     swprintf_s(valueText, 32, L"%d%%", g_app.settings.volume);
-    draw_slider(dc, CONTROL_VOLUME, VOLUME_SLIDER_Y, g_app.settings.volume, 0, 100, 0, valueText);
+    draw_slider(&surface, dc, CONTROL_VOLUME, VOLUME_SLIDER_Y, g_app.settings.volume, 0, 100, 0, valueText);
     format_interval(g_app.settings.minimumMinutes, valueText, 32);
-    draw_slider(dc, CONTROL_MINIMUM_INTERVAL, MINIMUM_SLIDER_Y, g_app.settings.minimumMinutes, 30, 480, 16, valueText);
+    draw_slider(&surface, dc, CONTROL_MINIMUM_INTERVAL, MINIMUM_SLIDER_Y, g_app.settings.minimumMinutes, 30, 480, 16, valueText);
     format_interval(g_app.settings.maximumMinutes, valueText, 32);
-    draw_slider(dc, CONTROL_MAXIMUM_INTERVAL, MAXIMUM_SLIDER_Y, g_app.settings.maximumMinutes, 30, 480, 16, valueText);
+    draw_slider(&surface, dc, CONTROL_MAXIMUM_INTERVAL, MAXIMUM_SLIDER_Y, g_app.settings.maximumMinutes, 30, 480, 16, valueText);
 
     RECT divider = logical_rect(78, 271, 682, 272);
     fill_rect_color(dc, &divider, RGB(220, 220, 220));
@@ -704,7 +784,7 @@ static void paint_ui(HWND window) {
 
     label = logical_rect(40, 379, 185, 431);
     draw_text(dc, L"Launch at login", label, g_app.bodyFont, RGB(32, 32, 32), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    draw_toggle(dc, TOGGLE_X, TOGGLE_Y, g_app.autoStart);
+    draw_toggle(&surface, dc, TOGGLE_X, TOGGLE_Y, g_app.autoStart);
     draw_install_button(dc);
 
     BitBlt(target, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
