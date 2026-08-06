@@ -536,17 +536,53 @@ typedef struct PixelSurface {
     int height;
 } PixelSurface;
 
-static unsigned blend_circle_channel(
+static unsigned blend_coverage_channel(
     unsigned background,
     unsigned fill,
     unsigned border,
-    BellwinCircleCoverage coverage
+    unsigned fillCoverage,
+    unsigned borderCoverage
 ) {
-    unsigned outside = BELLWIN_AA_SAMPLE_COUNT - coverage.fill - coverage.border;
+    unsigned outside = BELLWIN_AA_SAMPLE_COUNT - fillCoverage - borderCoverage;
     return (
-        background * outside + fill * coverage.fill + border * coverage.border
+        background * outside + fill * fillCoverage + border * borderCoverage
         + BELLWIN_AA_SAMPLE_COUNT / 2
     ) / BELLWIN_AA_SAMPLE_COUNT;
+}
+
+static void blend_coverage_pixel(
+    PixelSurface *surface,
+    int x,
+    int y,
+    COLORREF fill,
+    COLORREF border,
+    unsigned fillCoverage,
+    unsigned borderCoverage
+) {
+    uint32_t background = surface->pixels[y * surface->width + x];
+    unsigned red = blend_coverage_channel(
+        (background >> 16) & 0xff,
+        GetRValue(fill),
+        GetRValue(border),
+        fillCoverage,
+        borderCoverage
+    );
+    unsigned green = blend_coverage_channel(
+        (background >> 8) & 0xff,
+        GetGValue(fill),
+        GetGValue(border),
+        fillCoverage,
+        borderCoverage
+    );
+    unsigned blue = blend_coverage_channel(
+        background & 0xff,
+        GetBValue(fill),
+        GetBValue(border),
+        fillCoverage,
+        borderCoverage
+    );
+    surface->pixels[y * surface->width + x] =
+        (background & 0xff000000) | (red << 16) | (green << 8) | blue;
 }
 
 static void draw_antialiased_circle(
@@ -578,18 +614,33 @@ static void draw_antialiased_circle(
             );
             if (coverage.fill == 0 && coverage.border == 0) continue;
 
-            uint32_t background = surface->pixels[y * surface->width + x];
-            unsigned red = blend_circle_channel(
-                (background >> 16) & 0xff, GetRValue(fill), GetRValue(border), coverage
+            blend_coverage_pixel(
+                surface, x, y, fill, border, coverage.fill, coverage.border
             );
-            unsigned green = blend_circle_channel(
-                (background >> 8) & 0xff, GetGValue(fill), GetGValue(border), coverage
+        }
+    }
+}
+
+static void draw_antialiased_horizontal_capsule(
+    PixelSurface *surface,
+    const RECT *rect,
+    COLORREF color
+) {
+    if (!surface->pixels || rect->right <= rect->left || rect->bottom <= rect->top) return;
+
+    int left = rect->left < 0 ? 0 : rect->left;
+    int top = rect->top < 0 ? 0 : rect->top;
+    int right = rect->right > surface->width ? surface->width : rect->right;
+    int bottom = rect->bottom > surface->height ? surface->height : rect->bottom;
+
+    GdiFlush();
+    for (int y = top; y < bottom; ++y) {
+        for (int x = left; x < right; ++x) {
+            unsigned coverage = bellwin_horizontal_capsule_coverage(
+                x, y, rect->left, rect->top, rect->right, rect->bottom
             );
-            unsigned blue = blend_circle_channel(
-                background & 0xff, GetBValue(fill), GetBValue(border), coverage
-            );
-            surface->pixels[y * surface->width + x] =
-                (background & 0xff000000) | (red << 16) | (green << 8) | blue;
+            if (coverage == 0) continue;
+            blend_coverage_pixel(surface, x, y, color, color, coverage, 0);
         }
     }
 }
@@ -693,7 +744,9 @@ static void draw_time_box(HDC dc, ControlId control, int x, int y, int minuteOfD
 
 static void draw_toggle(PixelSurface *surface, HDC dc, int x, int y, int on) {
     RECT track = logical_rect(x, y, x + 54, y + 30);
-    rounded_rect(dc, &track, 30, on ? RGB(0, 120, 212) : RGB(145, 149, 154), on ? RGB(0, 120, 212) : RGB(145, 149, 154));
+    draw_antialiased_horizontal_capsule(
+        surface, &track, on ? RGB(0, 120, 212) : RGB(145, 149, 154)
+    );
     int knobX = on ? x + 39 : x + 15;
     draw_antialiased_circle(
         surface,

@@ -98,6 +98,23 @@ static void test_antialiased_circle_coverage(void) {
     assert(fillOnly.border == 0);
 }
 
+static void test_antialiased_capsule_coverage(void) {
+    assert(
+        bellwin_horizontal_capsule_coverage(27, 14, 0, 0, 54, 30)
+        == BELLWIN_AA_SAMPLE_COUNT
+    );
+    assert(
+        bellwin_horizontal_capsule_coverage(0, 14, 0, 0, 54, 30)
+        == BELLWIN_AA_SAMPLE_COUNT
+    );
+    assert(bellwin_horizontal_capsule_coverage(0, 0, 0, 0, 54, 30) == 0);
+
+    uint8_t partial = bellwin_horizontal_capsule_coverage(3, 5, 0, 0, 54, 30);
+    assert(partial > 0);
+    assert(partial < BELLWIN_AA_SAMPLE_COUNT);
+    assert(partial == bellwin_horizontal_capsule_coverage(50, 5, 0, 0, 54, 30));
+}
+
 int main(void) {
     test_overnight_quiet_hours();
     test_daytime_quiet_hours();
@@ -109,6 +126,7 @@ int main(void) {
     test_time_segment_selection_cycles();
     test_pause_state();
     test_antialiased_circle_coverage();
+    test_antialiased_capsule_coverage();
     puts("core tests passed");
     return 0;
 }
