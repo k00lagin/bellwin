@@ -135,9 +135,11 @@ typedef struct AppState {
     WheelState wheel;
     int windowFocused;
     int hoverInstall;
+    int trackingMouseLeave;
     int autoStart;
     int showInstall;
     int updateAvailable;
+    uint64_t installedVersion;
     int exiting;
     ULONGLONG nextBellTick;
     PauseState pause;
@@ -419,6 +421,18 @@ static uint64_t current_version(void) {
     return ((uint64_t)VER_MAJOR << 48) | ((uint64_t)VER_MINOR << 32) | ((uint64_t)VER_PATCH << 16) | (uint64_t)VER_BUILD;
 }
 
+static void format_version(uint64_t version, wchar_t *buffer, size_t count) {
+    swprintf_s(
+        buffer,
+        count,
+        L"%u.%u.%u.%u",
+        (unsigned)((version >> 48) & 0xffff),
+        (unsigned)((version >> 32) & 0xffff),
+        (unsigned)((version >> 16) & 0xffff),
+        (unsigned)(version & 0xffff)
+    );
+}
+
 static int known_folder_file_path(REFKNOWNFOLDERID folderId, const wchar_t *fileName, wchar_t *path, size_t pathCount) {
     PWSTR folder = NULL;
     HRESULT result = SHGetKnownFolderPath(folderId, 0, NULL, &folder);
@@ -430,15 +444,16 @@ static int known_folder_file_path(REFKNOWNFOLDERID folderId, const wchar_t *file
 
 static void refresh_install_state(void) {
     int installed = file_exists(g_app.installedExePath);
-    uint64_t installedVersion = installed ? executable_version(g_app.installedExePath) : 0;
+    g_app.installedVersion = installed ? executable_version(g_app.installedExePath) : 0;
     wchar_t desktopShortcut[MAX_PATH];
     wchar_t startMenuShortcut[MAX_PATH];
     int shortcutsReady = known_folder_file_path(&FOLDERID_Desktop, L"Bellwin.lnk", desktopShortcut, MAX_PATH)
         && known_folder_file_path(&FOLDERID_Programs, L"Bellwin.lnk", startMenuShortcut, MAX_PATH)
         && file_exists(desktopShortcut)
         && file_exists(startMenuShortcut);
-    g_app.updateAvailable = installed && installedVersion < current_version();
+    g_app.updateAvailable = installed && g_app.installedVersion < current_version();
     g_app.showInstall = !installed || g_app.updateAvailable || !shortcutsReady;
+    if (!g_app.showInstall) g_app.hoverInstall = 0;
 }
 
 static HRESULT create_shortcut(REFKNOWNFOLDERID folderId, const wchar_t *fileName, const wchar_t *target) {
@@ -779,6 +794,49 @@ static void draw_install_button(HDC dc) {
     if (control_has_visible_focus(CONTROL_INSTALL)) draw_focus_outline(dc, &button, 5);
 }
 
+static void draw_update_tooltip(HDC dc) {
+    if (!g_app.hoverInstall || !g_app.updateAvailable) return;
+
+    wchar_t installed[24];
+    wchar_t current[24];
+    wchar_t text[80];
+    format_version(g_app.installedVersion, installed, sizeof(installed) / sizeof(installed[0]));
+    format_version(current_version(), current, sizeof(current) / sizeof(current[0]));
+    swprintf_s(
+        text,
+        sizeof(text) / sizeof(text[0]),
+        L"Update from %ls to %ls",
+        installed,
+        current
+    );
+
+    RECT measured = {0};
+    HGDIOBJ oldFont = SelectObject(dc, g_app.smallFont);
+    DrawTextW(dc, text, -1, &measured, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dc, oldFont);
+
+    int horizontalPadding = px(9);
+    int verticalPadding = px(6);
+    int gap = px(8);
+    RECT tooltip = {
+        px(INSTALL_RIGHT) - (measured.right - measured.left) - horizontalPadding * 2,
+        px(INSTALL_TOP) - gap - (measured.bottom - measured.top) - verticalPadding * 2,
+        px(INSTALL_RIGHT),
+        px(INSTALL_TOP) - gap,
+    };
+    rounded_rect(dc, &tooltip, 4, RGB(255, 255, 225), RGB(118, 118, 118));
+    RECT content = tooltip;
+    InflateRect(&content, -horizontalPadding, -verticalPadding);
+    draw_text(
+        dc,
+        text,
+        content,
+        g_app.smallFont,
+        RGB(32, 32, 32),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX
+    );
+}
+
 static void paint_ui(HWND window) {
     PAINTSTRUCT paint;
     HDC target = BeginPaint(window, &paint);
@@ -839,6 +897,7 @@ static void paint_ui(HWND window) {
     draw_text(dc, L"Launch at login", label, g_app.bodyFont, RGB(32, 32, 32), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     draw_toggle(&surface, dc, TOGGLE_X, TOGGLE_Y, g_app.autoStart);
     draw_install_button(dc);
+    draw_update_tooltip(dc);
 
     BitBlt(target, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
     SelectObject(dc, oldBitmap);
@@ -1249,6 +1308,14 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         return 0;
     }
     case WM_MOUSEMOVE: {
+        if (!g_app.trackingMouseLeave) {
+            TRACKMOUSEEVENT tracking = {
+                .cbSize = sizeof(tracking),
+                .dwFlags = TME_LEAVE,
+                .hwndTrack = window,
+            };
+            if (TrackMouseEvent(&tracking)) g_app.trackingMouseLeave = 1;
+        }
         int x = logical_x(lParam);
         int y = logical_y(lParam);
         if (g_app.draggingSlider) update_slider_from_mouse(g_app.draggingSlider, x);
@@ -1259,6 +1326,13 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         }
         return 0;
     }
+    case WM_MOUSELEAVE:
+        g_app.trackingMouseLeave = 0;
+        if (g_app.hoverInstall) {
+            g_app.hoverInstall = 0;
+            InvalidateRect(window, NULL, FALSE);
+        }
+        return 0;
     case WM_LBUTTONUP:
         if (g_app.draggingSlider) {
             finish_slider_drag();
