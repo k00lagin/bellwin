@@ -1,7 +1,9 @@
 #ifndef BELLWIN_CORE_H
 #define BELLWIN_CORE_H
 
+#include <stddef.h>
 #include <stdint.h>
+#include <wchar.h>
 
 typedef struct BellwinSettings {
     int volume;
@@ -55,13 +57,23 @@ static int bellwin_is_quiet(int minuteOfDay, int quietStart, int quietEnd) {
     return minuteOfDay >= quietStart || minuteOfDay < quietEnd;
 }
 
-static int bellwin_minutes_until_quiet_end(int minuteOfDay, int quietStart, int quietEnd) {
-    minuteOfDay = bellwin_normalize_day_minute(minuteOfDay);
-    quietStart = bellwin_normalize_day_minute(quietStart);
-    quietEnd = bellwin_normalize_day_minute(quietEnd);
-    if (!bellwin_is_quiet(minuteOfDay, quietStart, quietEnd)) return 0;
-    if (quietEnd > minuteOfDay) return quietEnd - minuteOfDay;
-    return 24 * 60 - minuteOfDay + quietEnd;
+static uint64_t bellwin_seconds_until_minute_of_day(
+    int currentSecondOfDay,
+    int targetMinuteOfDay
+) {
+    currentSecondOfDay %= 24 * 60 * 60;
+    if (currentSecondOfDay < 0) currentSecondOfDay += 24 * 60 * 60;
+    int targetSecond = bellwin_normalize_day_minute(targetMinuteOfDay) * 60;
+    int seconds = targetSecond - currentSecondOfDay;
+    if (seconds <= 0) seconds += 24 * 60 * 60;
+    return (uint64_t)seconds;
+}
+
+static uint64_t bellwin_limit_active_segment(
+    uint64_t remainingActiveSeconds,
+    uint64_t secondsUntilQuiet
+) {
+    return remainingActiveSeconds < secondsUntilQuiet ? remainingActiveSeconds : secondsUntilQuiet;
 }
 
 static int bellwin_random_delay_minutes(int minimumMinutes, int maximumMinutes, uint32_t randomValue) {
@@ -100,6 +112,56 @@ static int bellwin_step_time_segment(int minuteOfDay, BellwinTimeSegment segment
 
 static int bellwin_pause_is_active(uint64_t nowTick, uint64_t pauseUntilTick, int pauseIndefinitely) {
     return pauseIndefinitely || (pauseUntilTick != 0 && nowTick < pauseUntilTick);
+}
+
+static int bellwin_timed_pause_is_valid(
+    uint64_t startedUnixSeconds,
+    uint64_t untilUnixSeconds,
+    int selectedMinutes,
+    uint64_t maximumUnixSeconds
+) {
+    int supportedDuration = selectedMinutes == 30 || selectedMinutes == 60 || selectedMinutes == 120;
+    return supportedDuration
+        && startedUnixSeconds != 0
+        && untilUnixSeconds >= startedUnixSeconds
+        && untilUnixSeconds <= maximumUnixSeconds
+        && untilUnixSeconds - startedUnixSeconds == (uint64_t)selectedMinutes * 60ULL;
+}
+
+static void bellwin_format_last_ring(uint64_t elapsedSeconds, wchar_t *buffer, size_t count) {
+    if (!buffer || count == 0) return;
+
+    if (elapsedSeconds < 10) {
+        swprintf(buffer, count, L"Rang just now");
+    } else if (elapsedSeconds < 60) {
+        swprintf(
+            buffer,
+            count,
+            elapsedSeconds == 1 ? L"Rang 1 second ago" : L"Rang %llu seconds ago",
+            (unsigned long long)elapsedSeconds
+        );
+    } else if (elapsedSeconds < 60 * 60) {
+        uint64_t minutes = elapsedSeconds / 60;
+        swprintf(
+            buffer,
+            count,
+            minutes == 1 ? L"Rang 1 minute ago" : L"Rang %llu minutes ago",
+            (unsigned long long)minutes
+        );
+    } else if (elapsedSeconds < 24 * 60 * 60) {
+        uint64_t hours = elapsedSeconds / (60 * 60);
+        swprintf(
+            buffer,
+            count,
+            hours == 1 ? L"Rang 1 hour ago" : L"Rang %llu hours ago",
+            (unsigned long long)hours
+        );
+    } else if (elapsedSeconds < 2 * 24 * 60 * 60) {
+        swprintf(buffer, count, L"Rang yesterday");
+    } else {
+        uint64_t days = elapsedSeconds / (24 * 60 * 60);
+        swprintf(buffer, count, L"Rang %llu days ago", (unsigned long long)days);
+    }
 }
 
 #endif

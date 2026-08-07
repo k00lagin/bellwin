@@ -18,10 +18,18 @@ their focus indication. Left/right arrows cycle between the hours and minutes
 pairs.
 
 Left-clicking the tray icon opens Settings. Its context menu can ring the bell
-immediately, pause ringing for 30 minutes, 1 hour, or 2 hours, toggle an
-indefinite pause, or exit the application. While a timed pause is active, the
-**Pause for** submenu includes **Unpause**. After a timed or indefinite pause
-ends, Bellwin starts a fresh random interval before the next bell.
+immediately, show how long ago the previous bell rang, pause ringing for 30
+minutes, 1 hour, or 2 hours, toggle an indefinite pause, or exit the
+application. While paused, the tray icon is desaturated and rotated 90°
+counter-clockwise,
+and the menu shows when a timed pause ends. While a timed pause is active, the
+**Pause for** submenu includes **Unpause**. Pauses survive application restarts.
+After a timed or indefinite pause ends, Bellwin starts a fresh random interval
+before the next bell.
+
+Random intervals count only time outside quiet hours. Bellwin arms a timer for
+the next meaningful event instead of polling every second. Volume changes
+preview the bell without changing its schedule.
 
 ## Build
 
@@ -45,8 +53,7 @@ Run the core scheduling tests with:
 ## Installation
 
 The **Install** button copies the executable to
-`%LOCALAPPDATA%\Bellwin\Bellwin.exe` and creates shortcuts on the Desktop and in
-the Start menu. If the installed file has a different version, the button is
-shown as **Update**. **Launch at login** adds or removes the per-user startup
-entry; startup launches Bellwin in the tray without opening the settings
-window.
+`%LOCALAPPDATA%\Bellwin\Bellwin.exe` and creates a shortcut in the Start menu.
+If the installed file has a different version, the button is shown as
+**Update**. **Launch at login** adds or removes the per-user startup entry;
+startup launches Bellwin in the tray without opening the settings window.

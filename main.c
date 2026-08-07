@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <wchar.h>
 
@@ -21,6 +22,7 @@
 #define APP_NAME L"Bellwin"
 #define APP_MUTEX L"Local\\Bellwin.SingleInstance"
 #define TIMER_SCHEDULE 1
+#define TIMER_VOLUME_PREVIEW 2
 #define WM_TRAY (WM_APP + 1)
 #define WM_SHOW_BELLWIN (WM_APP + 2)
 #define CMD_TRAY_SHOW 1001
@@ -31,6 +33,7 @@
 #define CMD_TRAY_PAUSE_INDEFINITELY 1006
 #define CMD_TRAY_EXIT 1007
 #define CMD_TRAY_UNPAUSE 1008
+#define MAX_SUPPORTED_UNIX_SECONDS 32503680000ULL
 
 typedef BOOL (WINAPI *SetProcessDpiAwarenessContextFn)(HANDLE);
 typedef UINT (WINAPI *GetDpiForWindowFn)(HWND);
@@ -80,7 +83,8 @@ typedef enum PauseMode {
 
 typedef struct PauseState {
     PauseMode mode;
-    ULONGLONG untilTick;
+    uint64_t startedUnixSeconds;
+    uint64_t untilUnixSeconds;
     int selectedMinutes;
 } PauseState;
 
@@ -122,6 +126,7 @@ typedef struct AppState {
     HANDLE mutex;
     HICON largeIcon;
     HICON smallIcon;
+    HICON pausedSmallIcon;
     NOTIFYICONDATAW tray;
     BellwinSettings settings;
     HFONT titleFont;
@@ -141,7 +146,10 @@ typedef struct AppState {
     int updateAvailable;
     uint64_t installedVersion;
     int exiting;
-    ULONGLONG nextBellTick;
+    uint64_t remainingActiveSeconds;
+    uint64_t plannedActiveSeconds;
+    ULONGLONG activeSegmentStartTick;
+    uint64_t lastRingUnixSeconds;
     PauseState pause;
     wchar_t appDataDirectory[MAX_PATH];
     wchar_t settingsPath[MAX_PATH];
@@ -152,7 +160,7 @@ typedef struct AppState {
 static AppState g_app;
 static UINT g_taskbarCreated;
 
-static void update_tray_tip(void);
+static void update_tray_state(void);
 
 static int px(int logical) {
     return MulDiv(logical, g_app.dpi, 96);
@@ -242,12 +250,44 @@ static void write_setting(const wchar_t *key, int value) {
     WritePrivateProfileStringW(L"Bellwin", key, text, g_app.settingsPath);
 }
 
+static void write_u64_setting(const wchar_t *key, uint64_t value) {
+    wchar_t text[32];
+    swprintf_s(text, 32, L"%llu", (unsigned long long)value);
+    WritePrivateProfileStringW(L"Bellwin", key, text, g_app.settingsPath);
+}
+
+static uint64_t read_u64_setting(const wchar_t *key) {
+    wchar_t text[32];
+    GetPrivateProfileStringW(L"Bellwin", key, L"0", text, 32, g_app.settingsPath);
+    uint64_t value = 0;
+    for (const wchar_t *character = text; *character; ++character) {
+        if (*character < L'0' || *character > L'9') return 0;
+        unsigned digit = (unsigned)(*character - L'0');
+        if (value > (UINT64_MAX - digit) / 10) return 0;
+        value = value * 10 + digit;
+    }
+    return value;
+}
+
+static uint64_t current_unix_seconds(void) {
+    __time64_t now = _time64(NULL);
+    return now > 0 ? (uint64_t)now : 0;
+}
+
 static void save_settings(void) {
     write_setting(L"Volume", g_app.settings.volume);
     write_setting(L"MinimumMinutes", g_app.settings.minimumMinutes);
     write_setting(L"MaximumMinutes", g_app.settings.maximumMinutes);
     write_setting(L"QuietStartMinutes", g_app.settings.quietStartMinutes);
     write_setting(L"QuietEndMinutes", g_app.settings.quietEndMinutes);
+}
+
+static void save_runtime_state(void) {
+    write_u64_setting(L"LastRingTime", g_app.lastRingUnixSeconds);
+    write_setting(L"PauseMode", (int)g_app.pause.mode);
+    write_u64_setting(L"PauseStartedTime", g_app.pause.startedUnixSeconds);
+    write_u64_setting(L"PauseUntilTime", g_app.pause.untilUnixSeconds);
+    write_setting(L"PauseSelectedMinutes", g_app.pause.selectedMinutes);
 }
 
 static void load_settings(void) {
@@ -257,6 +297,43 @@ static void load_settings(void) {
     g_app.settings.quietStartMinutes = GetPrivateProfileIntW(L"Bellwin", L"QuietStartMinutes", 22 * 60, g_app.settingsPath);
     g_app.settings.quietEndMinutes = GetPrivateProfileIntW(L"Bellwin", L"QuietEndMinutes", 10 * 60, g_app.settingsPath);
     bellwin_clamp_settings(&g_app.settings);
+
+    g_app.lastRingUnixSeconds = read_u64_setting(L"LastRingTime");
+    int pauseMode = GetPrivateProfileIntW(L"Bellwin", L"PauseMode", PAUSE_NONE, g_app.settingsPath);
+    g_app.pause.mode = pauseMode >= PAUSE_NONE && pauseMode <= PAUSE_INDEFINITE
+        ? (PauseMode)pauseMode
+        : PAUSE_NONE;
+    g_app.pause.startedUnixSeconds = read_u64_setting(L"PauseStartedTime");
+    g_app.pause.untilUnixSeconds = read_u64_setting(L"PauseUntilTime");
+    g_app.pause.selectedMinutes = GetPrivateProfileIntW(L"Bellwin", L"PauseSelectedMinutes", 0, g_app.settingsPath);
+    uint64_t now = current_unix_seconds();
+    int runtimeStateChanged = 0;
+    if (g_app.lastRingUnixSeconds > MAX_SUPPORTED_UNIX_SECONDS
+        || g_app.lastRingUnixSeconds > now) {
+        g_app.lastRingUnixSeconds = 0;
+        runtimeStateChanged = 1;
+    }
+    if (g_app.pause.mode == PAUSE_TIMED
+        && (!bellwin_timed_pause_is_valid(
+                g_app.pause.startedUnixSeconds,
+                g_app.pause.untilUnixSeconds,
+                g_app.pause.selectedMinutes,
+                MAX_SUPPORTED_UNIX_SECONDS
+            )
+            || now >= g_app.pause.untilUnixSeconds)) {
+        ZeroMemory(&g_app.pause, sizeof(g_app.pause));
+        runtimeStateChanged = 1;
+    } else if (g_app.pause.mode != PAUSE_TIMED) {
+        if (g_app.pause.startedUnixSeconds != 0
+            || g_app.pause.untilUnixSeconds != 0
+            || g_app.pause.selectedMinutes != 0) {
+            runtimeStateChanged = 1;
+        }
+        g_app.pause.startedUnixSeconds = 0;
+        g_app.pause.untilUnixSeconds = 0;
+        g_app.pause.selectedMinutes = 0;
+    }
+    if (runtimeStateChanged) save_runtime_state();
 }
 
 static int extract_sound(void) {
@@ -276,14 +353,14 @@ static int extract_sound(void) {
     return ok && written == size;
 }
 
-static void play_bell(void) {
+static int play_bell(void) {
     wchar_t command[MAX_PATH + 96];
     mciSendStringW(L"close bellwin_sound", NULL, 0, NULL);
-    if (swprintf_s(command, MAX_PATH + 96, L"open \"%ls\" type mpegvideo alias bellwin_sound", g_app.soundPath) < 0) return;
-    if (mciSendStringW(command, NULL, 0, NULL) != 0) return;
+    if (swprintf_s(command, MAX_PATH + 96, L"open \"%ls\" type mpegvideo alias bellwin_sound", g_app.soundPath) < 0) return 0;
+    if (mciSendStringW(command, NULL, 0, NULL) != 0) return 0;
     swprintf_s(command, MAX_PATH + 96, L"setaudio bellwin_sound volume to %d", g_app.settings.volume * 10);
     mciSendStringW(command, NULL, 0, NULL);
-    mciSendStringW(L"play bellwin_sound from 0", NULL, 0, NULL);
+    return mciSendStringW(L"play bellwin_sound from 0", NULL, 0, NULL) == 0;
 }
 
 static uint32_t random_u32(void) {
@@ -293,45 +370,199 @@ static uint32_t random_u32(void) {
     return value;
 }
 
-static int current_minute_of_day(void) {
+static int current_second_of_day(void) {
     SYSTEMTIME now;
     GetLocalTime(&now);
-    return now.wHour * 60 + now.wMinute;
+    return now.wHour * 60 * 60 + now.wMinute * 60 + now.wSecond;
+}
+
+static uint64_t file_time_ticks(const FILETIME *time) {
+    ULARGE_INTEGER value;
+    value.LowPart = time->dwLowDateTime;
+    value.HighPart = time->dwHighDateTime;
+    return value.QuadPart;
+}
+
+static uint64_t seconds_until_local_minute_of_day(int targetMinuteOfDay) {
+    SYSTEMTIME localNow;
+    GetLocalTime(&localNow);
+
+    SYSTEMTIME localTarget = localNow;
+    targetMinuteOfDay = bellwin_normalize_day_minute(targetMinuteOfDay);
+    localTarget.wHour = (WORD)(targetMinuteOfDay / 60);
+    localTarget.wMinute = (WORD)(targetMinuteOfDay % 60);
+    localTarget.wSecond = 0;
+    localTarget.wMilliseconds = 0;
+
+    int currentSecond = localNow.wHour * 60 * 60 + localNow.wMinute * 60 + localNow.wSecond;
+    if (targetMinuteOfDay * 60 <= currentSecond) {
+        FILETIME targetAsUtc;
+        if (!SystemTimeToFileTime(&localTarget, &targetAsUtc)) {
+            return bellwin_seconds_until_minute_of_day(currentSecond, targetMinuteOfDay);
+        }
+        ULARGE_INTEGER nextDay;
+        nextDay.LowPart = targetAsUtc.dwLowDateTime;
+        nextDay.HighPart = targetAsUtc.dwHighDateTime;
+        nextDay.QuadPart += 24ULL * 60ULL * 60ULL * 10000000ULL;
+        targetAsUtc.dwLowDateTime = nextDay.LowPart;
+        targetAsUtc.dwHighDateTime = nextDay.HighPart;
+        if (!FileTimeToSystemTime(&targetAsUtc, &localTarget)) {
+            return bellwin_seconds_until_minute_of_day(currentSecond, targetMinuteOfDay);
+        }
+    }
+
+    SYSTEMTIME utcTarget;
+    SYSTEMTIME utcNow;
+    FILETIME targetFileTime;
+    FILETIME nowFileTime;
+    GetSystemTime(&utcNow);
+    if (!TzSpecificLocalTimeToSystemTime(NULL, &localTarget, &utcTarget)
+        || !SystemTimeToFileTime(&utcTarget, &targetFileTime)
+        || !SystemTimeToFileTime(&utcNow, &nowFileTime)) {
+        return bellwin_seconds_until_minute_of_day(currentSecond, targetMinuteOfDay);
+    }
+
+    uint64_t targetTicks = file_time_ticks(&targetFileTime);
+    uint64_t nowTicks = file_time_ticks(&nowFileTime);
+    if (targetTicks <= nowTicks) {
+        return bellwin_seconds_until_minute_of_day(currentSecond, targetMinuteOfDay);
+    }
+    uint64_t deltaTicks = targetTicks - nowTicks;
+    return (deltaTicks + 9999999ULL) / 10000000ULL;
+}
+
+static int pause_is_active(uint64_t now) {
+    return bellwin_pause_is_active(now, g_app.pause.untilUnixSeconds, g_app.pause.mode == PAUSE_INDEFINITE);
+}
+
+static void arm_timer_after_milliseconds(UINT timerId, uint64_t milliseconds) {
+    if (!g_app.window) return;
+    KillTimer(g_app.window, timerId);
+
+    if (milliseconds > 0x7fffffffULL) milliseconds = 0x7fffffffULL;
+    if (milliseconds < USER_TIMER_MINIMUM) milliseconds = USER_TIMER_MINIMUM;
+    SetTimer(g_app.window, timerId, (UINT)milliseconds, NULL);
+}
+
+static void arm_timer_after_seconds(UINT timerId, uint64_t seconds) {
+    uint64_t milliseconds = seconds > UINT64_MAX / 1000 ? UINT64_MAX : seconds * 1000ULL;
+    arm_timer_after_milliseconds(timerId, milliseconds);
+}
+
+static void schedule_volume_preview(void) {
+    arm_timer_after_milliseconds(TIMER_VOLUME_PREVIEW, 200);
+}
+
+static void clear_active_segment(void) {
+    g_app.plannedActiveSeconds = 0;
+    g_app.activeSegmentStartTick = 0;
+}
+
+static void accrue_active_segment(void) {
+    if (g_app.plannedActiveSeconds == 0) return;
+
+    uint64_t elapsedSeconds = (GetTickCount64() - g_app.activeSegmentStartTick) / 1000ULL;
+    if (elapsedSeconds > g_app.plannedActiveSeconds) elapsedSeconds = g_app.plannedActiveSeconds;
+    if (elapsedSeconds > g_app.remainingActiveSeconds) elapsedSeconds = g_app.remainingActiveSeconds;
+    g_app.remainingActiveSeconds -= elapsedSeconds;
+    clear_active_segment();
+}
+
+static void arm_schedule_timer(void) {
+    if (!g_app.window) return;
+    KillTimer(g_app.window, TIMER_SCHEDULE);
+
+    uint64_t now = current_unix_seconds();
+    if (g_app.pause.mode == PAUSE_INDEFINITE) return;
+    if (g_app.pause.mode == PAUSE_TIMED && pause_is_active(now)) {
+        arm_timer_after_seconds(TIMER_SCHEDULE, g_app.pause.untilUnixSeconds - now);
+        return;
+    }
+    int currentSecond = current_second_of_day();
+    int currentMinute = currentSecond / 60;
+    if (bellwin_is_quiet(currentMinute, g_app.settings.quietStartMinutes, g_app.settings.quietEndMinutes)) {
+        clear_active_segment();
+        arm_timer_after_seconds(
+            TIMER_SCHEDULE,
+            seconds_until_local_minute_of_day(g_app.settings.quietEndMinutes)
+        );
+        return;
+    }
+    if (g_app.remainingActiveSeconds == 0) return;
+
+    uint64_t activeSeconds = g_app.remainingActiveSeconds;
+    if (g_app.settings.quietStartMinutes != g_app.settings.quietEndMinutes) {
+        activeSeconds = bellwin_limit_active_segment(
+            activeSeconds,
+            seconds_until_local_minute_of_day(g_app.settings.quietStartMinutes)
+        );
+    }
+    g_app.plannedActiveSeconds = activeSeconds;
+    g_app.activeSegmentStartTick = GetTickCount64();
+    arm_timer_after_seconds(TIMER_SCHEDULE, activeSeconds);
 }
 
 static void schedule_next_bell(void) {
-    int delay = bellwin_random_delay_minutes(
+    uint64_t now = current_unix_seconds();
+    if (g_app.pause.mode == PAUSE_TIMED && !pause_is_active(now)) {
+        ZeroMemory(&g_app.pause, sizeof(g_app.pause));
+        save_runtime_state();
+        update_tray_state();
+    }
+    if (pause_is_active(now)) {
+        g_app.remainingActiveSeconds = 0;
+        clear_active_segment();
+        arm_schedule_timer();
+        return;
+    }
+
+    int activeMinutes = bellwin_random_delay_minutes(
         g_app.settings.minimumMinutes,
         g_app.settings.maximumMinutes,
         random_u32()
     );
-    int quietWait = bellwin_minutes_until_quiet_end(
-        current_minute_of_day(),
-        g_app.settings.quietStartMinutes,
-        g_app.settings.quietEndMinutes
-    );
-    g_app.nextBellTick = GetTickCount64() + (ULONGLONG)(delay + quietWait) * 60ULL * 1000ULL;
+    g_app.remainingActiveSeconds = (uint64_t)activeMinutes * 60ULL;
+    clear_active_segment();
+    arm_schedule_timer();
 }
 
-static int pause_is_active(ULONGLONG now) {
-    return bellwin_pause_is_active(now, g_app.pause.untilTick, g_app.pause.mode == PAUSE_INDEFINITE);
+static void remember_last_ring(void) {
+    g_app.lastRingUnixSeconds = current_unix_seconds();
+    save_runtime_state();
 }
 
-static const wchar_t *tray_tip_text(void) {
-    return pause_is_active(GetTickCount64()) ? L"Bellwin — paused" : L"Bellwin — mindfulness bell";
+static void ring_and_remember(void) {
+    if (play_bell()) remember_last_ring();
+}
+
+static void continue_schedule_or_ring(void) {
+    int currentMinute = current_second_of_day() / 60;
+    if (g_app.remainingActiveSeconds != 0
+        || bellwin_is_quiet(currentMinute, g_app.settings.quietStartMinutes, g_app.settings.quietEndMinutes)) {
+        arm_schedule_timer();
+        return;
+    }
+    ring_and_remember();
+    schedule_next_bell();
 }
 
 static void pause_for_minutes(int minutes) {
     g_app.pause.mode = PAUSE_TIMED;
     g_app.pause.selectedMinutes = minutes;
-    g_app.pause.untilTick = GetTickCount64() + (ULONGLONG)minutes * 60ULL * 1000ULL;
-    update_tray_tip();
+    g_app.pause.startedUnixSeconds = current_unix_seconds();
+    g_app.pause.untilUnixSeconds = g_app.pause.startedUnixSeconds + (uint64_t)minutes * 60ULL;
+    g_app.remainingActiveSeconds = 0;
+    clear_active_segment();
+    save_runtime_state();
+    update_tray_state();
+    arm_schedule_timer();
 }
 
 static void resume_ringing(void) {
     ZeroMemory(&g_app.pause, sizeof(g_app.pause));
+    save_runtime_state();
+    update_tray_state();
     schedule_next_bell();
-    update_tray_tip();
 }
 
 static void toggle_indefinite_pause(void) {
@@ -340,9 +571,14 @@ static void toggle_indefinite_pause(void) {
         return;
     }
     g_app.pause.mode = PAUSE_INDEFINITE;
-    g_app.pause.untilTick = 0;
+    g_app.pause.startedUnixSeconds = 0;
+    g_app.pause.untilUnixSeconds = 0;
     g_app.pause.selectedMinutes = 0;
-    update_tray_tip();
+    g_app.remainingActiveSeconds = 0;
+    clear_active_segment();
+    save_runtime_state();
+    update_tray_state();
+    arm_schedule_timer();
 }
 
 static int is_autostart_enabled(void) {
@@ -445,11 +681,8 @@ static int known_folder_file_path(REFKNOWNFOLDERID folderId, const wchar_t *file
 static void refresh_install_state(void) {
     int installed = file_exists(g_app.installedExePath);
     g_app.installedVersion = installed ? executable_version(g_app.installedExePath) : 0;
-    wchar_t desktopShortcut[MAX_PATH];
     wchar_t startMenuShortcut[MAX_PATH];
-    int shortcutsReady = known_folder_file_path(&FOLDERID_Desktop, L"Bellwin.lnk", desktopShortcut, MAX_PATH)
-        && known_folder_file_path(&FOLDERID_Programs, L"Bellwin.lnk", startMenuShortcut, MAX_PATH)
-        && file_exists(desktopShortcut)
+    int shortcutsReady = known_folder_file_path(&FOLDERID_Programs, L"Bellwin.lnk", startMenuShortcut, MAX_PATH)
         && file_exists(startMenuShortcut);
     g_app.updateAvailable = installed && g_app.installedVersion < current_version();
     g_app.showInstall = !installed || g_app.updateAvailable || !shortcutsReady;
@@ -489,9 +722,8 @@ static int install_app(void) {
         if (!CopyFileW(source, g_app.installedExePath, FALSE)) return 0;
     }
 
-    HRESULT desktop = create_shortcut(&FOLDERID_Desktop, L"Bellwin.lnk", g_app.installedExePath);
     HRESULT startMenu = create_shortcut(&FOLDERID_Programs, L"Bellwin.lnk", g_app.installedExePath);
-    if (FAILED(desktop) || FAILED(startMenu)) return 0;
+    if (FAILED(startMenu)) return 0;
 
     if (g_app.autoStart && !set_autostart(1)) return 0;
     refresh_install_state();
@@ -872,9 +1104,9 @@ static void paint_ui(HWND window) {
     RECT label = logical_rect(78, 101, 310, 143);
     draw_text(dc, L"Bell volume", label, g_app.bodyFont, RGB(32, 32, 32), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     label = logical_rect(78, 157, 310, 199);
-    draw_text(dc, L"Ring from every", label, g_app.bodyFont, RGB(32, 32, 32), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(dc, L"Ring every", label, g_app.bodyFont, RGB(32, 32, 32), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     label = logical_rect(78, 213, 310, 255);
-    draw_text(dc, L"To every", label, g_app.bodyFont, RGB(32, 32, 32), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(dc, L"to", label, g_app.bodyFont, RGB(32, 32, 32), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     wchar_t valueText[32];
     swprintf_s(valueText, 32, L"%d%%", g_app.settings.volume);
@@ -1050,7 +1282,7 @@ static void set_slider_value(ControlId slider, int value, int persist) {
     }
     if (persist) {
         save_settings();
-        schedule_next_bell();
+        if (slider != CONTROL_VOLUME) schedule_next_bell();
     }
     InvalidateRect(g_app.window, NULL, FALSE);
 }
@@ -1068,6 +1300,7 @@ static void step_slider(ControlId slider, int direction, int wheel) {
             ? g_app.settings.minimumMinutes
             : g_app.settings.maximumMinutes;
     set_slider_value(slider, current + direction * step, 1);
+    if (slider == CONTROL_VOLUME) schedule_volume_preview();
 }
 
 static void wheel_logical_point(LPARAM lParam, int *x, int *y) {
@@ -1095,8 +1328,8 @@ static void finish_slider_drag(void) {
     ControlId finished = g_app.draggingSlider;
     g_app.draggingSlider = CONTROL_NONE;
     save_settings();
-    schedule_next_bell();
-    if (finished == CONTROL_VOLUME) play_bell();
+    if (finished == CONTROL_VOLUME) schedule_volume_preview();
+    else schedule_next_bell();
 }
 
 static void set_time_value(ControlId control, int value) {
@@ -1150,13 +1383,144 @@ static void activate_autostart(void) {
 static void activate_install(void) {
     if (!g_app.showInstall) return;
     if (install_app()) {
-        MessageBoxW(g_app.window, L"Bellwin was installed. Shortcuts were added to the Desktop and Start menu.", APP_NAME, MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(g_app.window, L"Bellwin was installed. A shortcut was added to the Start menu.", APP_NAME, MB_OK | MB_ICONINFORMATION);
     } else {
         MessageBoxW(g_app.window, L"Bellwin could not be installed.", APP_NAME, MB_OK | MB_ICONERROR);
     }
     if (!g_app.showInstall && g_app.focusedControl == CONTROL_INSTALL) {
         focus_control(CONTROL_AUTOSTART, g_app.focusVisibility);
     }
+}
+
+static int format_pause_until_time(wchar_t *buffer, size_t count) {
+    __time64_t pauseTime = (__time64_t)g_app.pause.untilUnixSeconds;
+    struct tm local;
+    if (_localtime64_s(&local, &pauseTime) != 0) return 0;
+
+    SYSTEMTIME time = {0};
+    time.wHour = (WORD)local.tm_hour;
+    time.wMinute = (WORD)local.tm_min;
+    return GetTimeFormatW(LOCALE_USER_DEFAULT, TIME_NOSECONDS, &time, NULL, buffer, (int)count) > 0;
+}
+
+static void format_pause_status(wchar_t *buffer, size_t count) {
+    if (g_app.pause.mode == PAUSE_INDEFINITE) {
+        swprintf_s(buffer, count, L"Paused indefinitely");
+        return;
+    }
+
+    wchar_t timeText[32];
+    if (format_pause_until_time(timeText, sizeof(timeText) / sizeof(timeText[0]))) {
+        swprintf_s(buffer, count, L"Paused until %ls", timeText);
+    } else {
+        swprintf_s(buffer, count, L"Paused");
+    }
+}
+
+static void format_tray_tip(wchar_t *buffer, size_t count) {
+    if (pause_is_active(current_unix_seconds())) {
+        wchar_t status[80];
+        format_pause_status(status, sizeof(status) / sizeof(status[0]));
+        swprintf_s(buffer, count, L"Bellwin — %ls", status);
+    } else {
+        swprintf_s(buffer, count, L"Bellwin — mindfulness bell");
+    }
+}
+
+static HICON create_paused_icon(HICON source, int size) {
+    if (!source || size <= 0) return NULL;
+
+    BITMAPINFO bitmapInfo = {0};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = size;
+    bitmapInfo.bmiHeader.biHeight = -size;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    uint32_t *pixels = NULL;
+    HBITMAP color = CreateDIBSection(NULL, &bitmapInfo, DIB_RGB_COLORS, (void **)&pixels, NULL, 0);
+    if (!color || !pixels) {
+        if (color) DeleteObject(color);
+        return NULL;
+    }
+
+    HDC colorDc = CreateCompatibleDC(NULL);
+    if (!colorDc) {
+        DeleteObject(color);
+        return NULL;
+    }
+    HGDIOBJ oldColor = SelectObject(colorDc, color);
+    ZeroMemory(pixels, (size_t)size * (size_t)size * sizeof(*pixels));
+    BOOL drawn = DrawIconEx(colorDc, 0, 0, source, size, size, 0, NULL, DI_NORMAL);
+    SelectObject(colorDc, oldColor);
+    DeleteDC(colorDc);
+    if (!drawn) {
+        DeleteObject(color);
+        return NULL;
+    }
+
+    size_t pixelCount = (size_t)size * (size_t)size;
+    uint32_t *sourcePixels = (uint32_t *)malloc(pixelCount * sizeof(*sourcePixels));
+    if (!sourcePixels) {
+        DeleteObject(color);
+        return NULL;
+    }
+    memcpy(sourcePixels, pixels, pixelCount * sizeof(*sourcePixels));
+
+    int hasAlpha = 0;
+    for (size_t index = 0; index < pixelCount; ++index) {
+        if ((sourcePixels[index] >> 24) != 0) {
+            hasAlpha = 1;
+            break;
+        }
+    }
+
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            uint32_t sourcePixel = sourcePixels[(size_t)x * (size_t)size + (size_t)(size - 1 - y)];
+            unsigned blue = sourcePixel & 0xff;
+            unsigned green = (sourcePixel >> 8) & 0xff;
+            unsigned red = (sourcePixel >> 16) & 0xff;
+            unsigned alpha = sourcePixel >> 24;
+            unsigned gray = (red * 30 + green * 59 + blue * 11) / 100;
+            if (!hasAlpha && (red || green || blue)) alpha = 255;
+            pixels[(size_t)y * (size_t)size + (size_t)x] =
+                (alpha << 24) | (gray << 16) | (gray << 8) | gray;
+        }
+    }
+    free(sourcePixels);
+
+    HBITMAP mask = CreateBitmap(size, size, 1, 1, NULL);
+    if (!mask) {
+        DeleteObject(color);
+        return NULL;
+    }
+    HDC maskDc = CreateCompatibleDC(NULL);
+    if (!maskDc) {
+        DeleteObject(mask);
+        DeleteObject(color);
+        return NULL;
+    }
+    HGDIOBJ oldMask = SelectObject(maskDc, mask);
+    PatBlt(maskDc, 0, 0, size, size, BLACKNESS);
+    SelectObject(maskDc, oldMask);
+    DeleteDC(maskDc);
+
+    ICONINFO iconInfo = {0};
+    iconInfo.fIcon = TRUE;
+    iconInfo.hbmMask = mask;
+    iconInfo.hbmColor = color;
+    HICON icon = CreateIconIndirect(&iconInfo);
+    DeleteObject(mask);
+    DeleteObject(color);
+    return icon;
+}
+
+static HICON current_tray_icon(void) {
+    return pause_is_active(current_unix_seconds()) && g_app.pausedSmallIcon
+        ? g_app.pausedSmallIcon
+        : g_app.smallIcon;
 }
 
 static void add_tray_icon(void) {
@@ -1166,18 +1530,19 @@ static void add_tray_icon(void) {
     g_app.tray.uID = 1;
     g_app.tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_app.tray.uCallbackMessage = WM_TRAY;
-    g_app.tray.hIcon = g_app.smallIcon;
-    wcscpy_s(g_app.tray.szTip, sizeof(g_app.tray.szTip) / sizeof(g_app.tray.szTip[0]), tray_tip_text());
+    g_app.tray.hIcon = current_tray_icon();
+    format_tray_tip(g_app.tray.szTip, sizeof(g_app.tray.szTip) / sizeof(g_app.tray.szTip[0]));
     Shell_NotifyIconW(NIM_ADD, &g_app.tray);
     g_app.tray.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &g_app.tray);
 }
 
-static void update_tray_tip(void) {
+static void update_tray_state(void) {
     if (!g_app.tray.cbSize) return;
     NOTIFYICONDATAW update = g_app.tray;
-    update.uFlags = NIF_TIP;
-    wcscpy_s(update.szTip, sizeof(update.szTip) / sizeof(update.szTip[0]), tray_tip_text());
+    update.uFlags = NIF_TIP | NIF_ICON;
+    update.hIcon = current_tray_icon();
+    format_tray_tip(update.szTip, sizeof(update.szTip) / sizeof(update.szTip[0]));
     Shell_NotifyIconW(NIM_MODIFY, &update);
 }
 
@@ -1203,7 +1568,7 @@ static void show_tray_menu(void) {
         return;
     }
 
-    ULONGLONG now = GetTickCount64();
+    uint64_t now = current_unix_seconds();
     int timedPauseActive = g_app.pause.mode == PAUSE_TIMED && pause_is_active(now);
     for (size_t index = 0; index < sizeof(PAUSE_DURATIONS) / sizeof(PAUSE_DURATIONS[0]); ++index) {
         const PauseDuration *duration = &PAUSE_DURATIONS[index];
@@ -1218,7 +1583,18 @@ static void show_tray_menu(void) {
 
     AppendMenuW(menu, MF_STRING, CMD_TRAY_SHOW, L"Settings");
     AppendMenuW(menu, MF_STRING, CMD_TRAY_RING, L"Ring now");
+    if (g_app.lastRingUnixSeconds != 0) {
+        wchar_t lastRingText[64];
+        uint64_t elapsed = now > g_app.lastRingUnixSeconds ? now - g_app.lastRingUnixSeconds : 0;
+        bellwin_format_last_ring(elapsed, lastRingText, sizeof(lastRingText) / sizeof(lastRingText[0]));
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, lastRingText);
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    if (pause_is_active(now)) {
+        wchar_t pauseText[80];
+        format_pause_status(pauseText, sizeof(pauseText) / sizeof(pauseText[0]));
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, pauseText);
+    }
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)pauseMenu, L"Pause for");
     AppendMenuW(menu,
         MF_STRING | (g_app.pause.mode == PAUSE_INDEFINITE ? MF_CHECKED : MF_UNCHECKED),
@@ -1393,20 +1769,39 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         }
         break;
     }
+    case WM_TIMECHANGE: {
+        uint64_t now = current_unix_seconds();
+        update_tray_state();
+        if (g_app.pause.mode == PAUSE_TIMED && !pause_is_active(now)) {
+            resume_ringing();
+        } else if (pause_is_active(now)) {
+            arm_schedule_timer();
+        } else {
+            accrue_active_segment();
+            continue_schedule_or_ring();
+        }
+        return 0;
+    }
     case WM_TIMER:
+        if (wParam == TIMER_VOLUME_PREVIEW) {
+            KillTimer(window, TIMER_VOLUME_PREVIEW);
+            play_bell();
+            return 0;
+        }
         if (wParam == TIMER_SCHEDULE) {
-            ULONGLONG now = GetTickCount64();
+            KillTimer(window, TIMER_SCHEDULE);
+            uint64_t now = current_unix_seconds();
             if (g_app.pause.mode == PAUSE_INDEFINITE) return 0;
             if (g_app.pause.mode == PAUSE_TIMED) {
-                if (pause_is_active(now)) return 0;
+                if (pause_is_active(now)) {
+                    arm_schedule_timer();
+                    return 0;
+                }
                 resume_ringing();
                 return 0;
             }
-            if (now < g_app.nextBellTick) return 0;
-            if (!bellwin_is_quiet(current_minute_of_day(), g_app.settings.quietStartMinutes, g_app.settings.quietEndMinutes)) {
-                play_bell();
-            }
-            schedule_next_bell();
+            accrue_active_segment();
+            continue_schedule_or_ring();
         }
         return 0;
     case WM_TRAY: {
@@ -1431,7 +1826,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
             show_window();
             return 0;
         case CMD_TRAY_RING:
-            play_bell();
+            ring_and_remember();
             schedule_next_bell();
             return 0;
         case CMD_TRAY_PAUSE_INDEFINITELY:
@@ -1503,6 +1898,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         return TRUE;
     case WM_DESTROY:
         KillTimer(window, TIMER_SCHEDULE);
+        KillTimer(window, TIMER_VOLUME_PREVIEW);
         remove_tray_icon();
         mciSendStringW(L"close bellwin_sound", NULL, 0, NULL);
         delete_fonts();
@@ -1597,6 +1993,7 @@ int main(void) {
 
     g_app.largeIcon = (HICON)LoadImageW(g_app.instance, MAKEINTRESOURCEW(IDI_BELLWIN), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
     g_app.smallIcon = (HICON)LoadImageW(g_app.instance, MAKEINTRESOURCEW(IDI_BELLWIN), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
+    g_app.pausedSmallIcon = create_paused_icon(g_app.smallIcon, 16);
 
     WNDCLASSEXW windowClass;
     ZeroMemory(&windowClass, sizeof(windowClass));
@@ -1647,7 +2044,6 @@ int main(void) {
         MessageBoxW(g_app.window, L"The embedded bell sound could not be prepared.", APP_NAME, MB_OK | MB_ICONERROR);
     }
     schedule_next_bell();
-    SetTimer(g_app.window, TIMER_SCHEDULE, 1000, NULL);
 
     if (!background) {
         ShowWindow(g_app.window, SW_SHOW);
@@ -1663,6 +2059,7 @@ int main(void) {
     if (SUCCEEDED(com)) CoUninitialize();
     if (g_app.largeIcon) DestroyIcon(g_app.largeIcon);
     if (g_app.smallIcon) DestroyIcon(g_app.smallIcon);
+    if (g_app.pausedSmallIcon) DestroyIcon(g_app.pausedSmallIcon);
     if (g_app.mutex) CloseHandle(g_app.mutex);
     return (int)message.wParam;
 }
