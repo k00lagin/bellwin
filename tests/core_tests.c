@@ -148,28 +148,28 @@ static void test_last_ring_relative_time_formatting(void) {
 }
 
 static void test_antialiased_circle_coverage(void) {
-    BellwinCircleCoverage center = bellwin_circle_coverage(9, 9, 10, 10, 10, 3);
+    BellwinShapeCoverage center = bellwin_circle_coverage(9, 9, 10, 10, 10, 3);
     assert(center.fill == BELLWIN_AA_SAMPLE_COUNT);
     assert(center.border == 0);
 
-    BellwinCircleCoverage edge = bellwin_circle_coverage(0, 9, 10, 10, 10, 3);
+    BellwinShapeCoverage edge = bellwin_circle_coverage(0, 9, 10, 10, 10, 3);
     assert(edge.fill == 0);
     assert(edge.border == BELLWIN_AA_SAMPLE_COUNT);
 
-    BellwinCircleCoverage corner = bellwin_circle_coverage(0, 0, 10, 10, 10, 3);
+    BellwinShapeCoverage corner = bellwin_circle_coverage(0, 0, 10, 10, 10, 3);
     assert(corner.fill == 0);
     assert(corner.border == 0);
 
-    BellwinCircleCoverage partial = bellwin_circle_coverage(1, 4, 10, 10, 10, 3);
+    BellwinShapeCoverage partial = bellwin_circle_coverage(1, 4, 10, 10, 10, 3);
     assert(partial.fill == 0);
     assert(partial.border > 0);
     assert(partial.border < BELLWIN_AA_SAMPLE_COUNT);
 
-    BellwinCircleCoverage mirror = bellwin_circle_coverage(18, 4, 10, 10, 10, 3);
+    BellwinShapeCoverage mirror = bellwin_circle_coverage(18, 4, 10, 10, 10, 3);
     assert(partial.fill == mirror.fill);
     assert(partial.border == mirror.border);
 
-    BellwinCircleCoverage fillOnly = bellwin_circle_coverage(1, 4, 10, 10, 10, 0);
+    BellwinShapeCoverage fillOnly = bellwin_circle_coverage(1, 4, 10, 10, 10, 0);
     assert(fillOnly.fill == partial.border);
     assert(fillOnly.border == 0);
 }
@@ -191,6 +191,39 @@ static void test_antialiased_capsule_coverage(void) {
     assert(partial == bellwin_horizontal_capsule_coverage(50, 5, 0, 0, 54, 30));
 }
 
+static void test_antialiased_rounded_rect_coverage(void) {
+    BellwinShapeCoverage center = bellwin_rounded_rect_coverage(
+        9, 9, 0, 0, 20, 20, 5, 2
+    );
+    assert(center.fill == BELLWIN_AA_SAMPLE_COUNT);
+    assert(center.border == 0);
+
+    BellwinShapeCoverage edge = bellwin_rounded_rect_coverage(
+        0, 9, 0, 0, 20, 20, 5, 2
+    );
+    assert(edge.fill == 0);
+    assert(edge.border == BELLWIN_AA_SAMPLE_COUNT);
+
+    BellwinShapeCoverage corner = bellwin_rounded_rect_coverage(
+        0, 0, 0, 0, 20, 20, 5, 2
+    );
+    assert(corner.fill == 0);
+    assert(corner.border == 0);
+
+    BellwinShapeCoverage partial = bellwin_rounded_rect_coverage(
+        1, 1, 0, 0, 20, 20, 5, 2
+    );
+    assert(partial.fill == 0);
+    assert(partial.border > 0);
+    assert(partial.border < BELLWIN_AA_SAMPLE_COUNT);
+
+    BellwinShapeCoverage mirror = bellwin_rounded_rect_coverage(
+        18, 1, 0, 0, 20, 20, 5, 2
+    );
+    assert(partial.fill == mirror.fill);
+    assert(partial.border == mirror.border);
+}
+
 int main(void) {
     test_overnight_quiet_hours();
     test_daytime_quiet_hours();
@@ -208,6 +241,7 @@ int main(void) {
     test_last_ring_relative_time_formatting();
     test_antialiased_circle_coverage();
     test_antialiased_capsule_coverage();
+    test_antialiased_rounded_rect_coverage();
     puts("core tests passed");
     return 0;
 }

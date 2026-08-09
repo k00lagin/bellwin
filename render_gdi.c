@@ -37,17 +37,6 @@ static void draw_text(HDC dc, const wchar_t *text, RECT rect, HFONT font, COLORR
     SelectObject(dc, oldFont);
 }
 
-/* radius is in physical pixels */
-static void draw_focus_outline(HDC dc, const RECT *rect, int radius) {
-    HPEN pen = CreatePen(PS_SOLID, px(2), g_app.theme.palette.focus);
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    RoundRect(dc, rect->left, rect->top, rect->right, rect->bottom, radius, radius);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(pen);
-}
-
 typedef struct PixelSurface {
     uint32_t *pixels;
     int width;
@@ -127,7 +116,7 @@ static void draw_antialiased_circle(
     GdiFlush();
     for (int y = top; y < bottom; ++y) {
         for (int x = left; x < right; ++x) {
-            BellwinCircleCoverage coverage = bellwin_circle_coverage(
+            BellwinShapeCoverage coverage = bellwin_circle_coverage(
                 x, y, centerX, centerY, radius, borderWidth
             );
             if (coverage.fill == 0 && coverage.border == 0) continue;
@@ -159,6 +148,39 @@ static void draw_antialiased_horizontal_capsule(
             );
             if (coverage == 0) continue;
             blend_coverage_pixel(surface, x, y, color, color, coverage, 0);
+        }
+    }
+}
+
+static void draw_antialiased_rounded_outline(
+    PixelSurface *surface,
+    const RECT *rect,
+    int radius,
+    int borderWidth,
+    COLORREF color
+) {
+    if (!surface->pixels || rect->right <= rect->left || rect->bottom <= rect->top) return;
+
+    int left = rect->left < 0 ? 0 : rect->left;
+    int top = rect->top < 0 ? 0 : rect->top;
+    int right = rect->right > surface->width ? surface->width : rect->right;
+    int bottom = rect->bottom > surface->height ? surface->height : rect->bottom;
+
+    GdiFlush();
+    for (int y = top; y < bottom; ++y) {
+        for (int x = left; x < right; ++x) {
+            BellwinShapeCoverage coverage = bellwin_rounded_rect_coverage(
+                x,
+                y,
+                rect->left,
+                rect->top,
+                rect->right,
+                rect->bottom,
+                radius,
+                borderWidth
+            );
+            if (coverage.border == 0) continue;
+            blend_coverage_pixel(surface, x, y, color, color, 0, coverage.border);
         }
     }
 }
@@ -447,7 +469,7 @@ static void render_ui_commands(Clay_RenderCommandArray commands, PixelSurface *s
 
 /* Keyboard focus is app state, not layout: drawn as an overlay from the
    focused widget's element box after the command list is rendered. */
-static void render_focus_ring(HDC dc) {
+static void render_focus_ring(PixelSurface *surface) {
     const Widget *widget = widget_by_id(g_app.focusedControl);
     if (!widget || !control_has_visible_focus(widget->id)) return;
     Clay_ElementData data = Clay_GetElementData(bellwin_ui_hit_id(widget->id));
@@ -464,7 +486,9 @@ static void render_focus_ring(HDC dc) {
     } else {
         return; /* time boxes indicate focus with the segment highlight */
     }
-    draw_focus_outline(dc, &rect, radius);
+    draw_antialiased_rounded_outline(
+        surface, &rect, radius, px(2), g_app.theme.palette.focus
+    );
 }
 
 void paint_ui(HWND window) {
@@ -496,7 +520,7 @@ void paint_ui(HWND window) {
         BellwinUiFrame frame = build_ui_frame();
         Clay_RenderCommandArray commands = bellwin_ui_build(&frame);
         render_ui_commands(commands, &surface, dc);
-        render_focus_ring(dc);
+        render_focus_ring(&surface);
     }
 
     BitBlt(target, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
