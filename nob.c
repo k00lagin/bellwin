@@ -54,6 +54,45 @@ static bool build_tests(void) {
     nob_cmd_append(
         &cmd,
         "clang", "-target", TARGET, "-fuse-ld=lld",
+        "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601",
+        "-Wall", "-Wextra", "-Werror",
+        "tests/widget_tests.c",
+        "-o", BUILD_FOLDER "widget_tests.exe",
+        "-Xlinker", "/SUBSYSTEM:CONSOLE,6.01", "-Xlinker", "/OSVERSION:6.1"
+    );
+    if (!nob_cmd_run(&cmd)) return false;
+    nob_cmd_append(&cmd, BUILD_FOLDER "widget_tests.exe");
+    if (!nob_cmd_run(&cmd)) return false;
+
+    nob_cmd_append(
+        &cmd,
+        "clang", "-target", TARGET, "-fuse-ld=lld",
+        "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601",
+        "-Wall", "-Wextra", "-Werror",
+        "tests/layout_tests.c", "layout.c",
+        "-o", BUILD_FOLDER "layout_tests.exe",
+        "-Xlinker", "/SUBSYSTEM:CONSOLE,6.01", "-Xlinker", "/OSVERSION:6.1"
+    );
+    if (!nob_cmd_run(&cmd)) return false;
+    nob_cmd_append(&cmd, BUILD_FOLDER "layout_tests.exe");
+    if (!nob_cmd_run(&cmd)) return false;
+
+    nob_cmd_append(
+        &cmd,
+        "clang", "-target", TARGET, "-fuse-ld=lld",
+        "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601",
+        "-Wall", "-Wextra", "-Werror",
+        "tests/cli_tests.c", "cli.c",
+        "-o", BUILD_FOLDER "cli_tests.exe",
+        "-Xlinker", "/SUBSYSTEM:CONSOLE,6.01", "-Xlinker", "/OSVERSION:6.1"
+    );
+    if (!nob_cmd_run(&cmd)) return false;
+    nob_cmd_append(&cmd, BUILD_FOLDER "cli_tests.exe");
+    if (!nob_cmd_run(&cmd)) return false;
+
+    nob_cmd_append(
+        &cmd,
+        "clang", "-target", TARGET, "-fuse-ld=lld",
         "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601", "-DBELLWIN_THEME_TESTING",
         "-Wall", "-Wextra", "-Werror",
         "tests/theme_tests.c", "theme.c",
@@ -100,12 +139,13 @@ int main(int argc, char **argv) {
         "clang", "-target", TARGET, "-fuse-ld=lld",
         "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601", "-DUNICODE", "-D_UNICODE",
         "-Os", "-Wall", "-Wextra", "-Werror",
-        "main.c", "theme.c", BUILD_FOLDER "version.res", BUILD_FOLDER "resources.res",
+        "main.c", "ui.c", "layout.c", "render_gdi.c", "uia.c", "cli.c", "theme.c", BUILD_FOLDER "version.res", BUILD_FOLDER "resources.res",
         "-o", "Bellwin.exe",
         "-Xlinker", "/SUBSYSTEM:WINDOWS,6.01", "-Xlinker", "/OSVERSION:6.1",
         "-Xlinker", "/ENTRY:mainCRTStartup",
         "-luser32", "-lgdi32", "-lshell32", "-lole32", "-luuid",
-        "-lwinmm", "-lversion", "-ladvapi32", "-ldwmapi"
+        "-lwinmm", "-lversion", "-ladvapi32", "-ldwmapi",
+        "-luiautomationcore", "-loleaut32"
     );
     if (!nob_cmd_run(&cmd)) return 1;
     nob_log(NOB_INFO, "Bellwin.exe built for Windows 7+ x86");

@@ -34,7 +34,7 @@ typedef enum BellwinTrayAction {
     BELLWIN_TRAY_ACTION_CANCEL_MENU_AND_SHOW_SETTINGS,
 } BellwinTrayAction;
 
-static BellwinTrayAction bellwin_tray_action(BellwinTrayEvent event, int *suppressLeftButtonUp) {
+static inline BellwinTrayAction bellwin_tray_action(BellwinTrayEvent event, int *suppressLeftButtonUp) {
     if (event == BELLWIN_TRAY_LEFT_BUTTON_UP) {
         if (*suppressLeftButtonUp) {
             *suppressLeftButtonUp = 0;
@@ -52,22 +52,22 @@ static BellwinTrayAction bellwin_tray_action(BellwinTrayEvent event, int *suppre
     return BELLWIN_TRAY_ACTION_NONE;
 }
 
-static BellwinTimeSegment bellwin_next_time_segment(BellwinTimeSegment segment) {
+static inline BellwinTimeSegment bellwin_next_time_segment(BellwinTimeSegment segment) {
     return segment == BELLWIN_TIME_HOURS ? BELLWIN_TIME_MINUTES : BELLWIN_TIME_HOURS;
 }
 
-static int bellwin_clamp_int(int value, int minimum, int maximum) {
+static inline int bellwin_clamp_int(int value, int minimum, int maximum) {
     if (value < minimum) return minimum;
     if (value > maximum) return maximum;
     return value;
 }
 
-static int bellwin_normalize_day_minute(int value) {
+static inline int bellwin_normalize_day_minute(int value) {
     value %= 24 * 60;
     return value < 0 ? value + 24 * 60 : value;
 }
 
-static void bellwin_clamp_settings(BellwinSettings *settings) {
+static inline void bellwin_clamp_settings(BellwinSettings *settings) {
     settings->volume = bellwin_clamp_int(settings->volume, 0, 100);
     settings->minimumMinutes = bellwin_clamp_int(settings->minimumMinutes, 30, 480);
     settings->maximumMinutes = bellwin_clamp_int(settings->maximumMinutes, 30, 480);
@@ -80,7 +80,7 @@ static void bellwin_clamp_settings(BellwinSettings *settings) {
     settings->quietEndMinutes = bellwin_normalize_day_minute(settings->quietEndMinutes);
 }
 
-static int bellwin_is_quiet(int minuteOfDay, int quietStart, int quietEnd) {
+static inline int bellwin_is_quiet(int minuteOfDay, int quietStart, int quietEnd) {
     minuteOfDay = bellwin_normalize_day_minute(minuteOfDay);
     quietStart = bellwin_normalize_day_minute(quietStart);
     quietEnd = bellwin_normalize_day_minute(quietEnd);
@@ -91,7 +91,7 @@ static int bellwin_is_quiet(int minuteOfDay, int quietStart, int quietEnd) {
     return minuteOfDay >= quietStart || minuteOfDay < quietEnd;
 }
 
-static uint64_t bellwin_seconds_until_minute_of_day(
+static inline uint64_t bellwin_seconds_until_minute_of_day(
     int currentSecondOfDay,
     int targetMinuteOfDay
 ) {
@@ -103,14 +103,14 @@ static uint64_t bellwin_seconds_until_minute_of_day(
     return (uint64_t)seconds;
 }
 
-static uint64_t bellwin_limit_active_segment(
+static inline uint64_t bellwin_limit_active_segment(
     uint64_t remainingActiveSeconds,
     uint64_t secondsUntilQuiet
 ) {
     return remainingActiveSeconds < secondsUntilQuiet ? remainingActiveSeconds : secondsUntilQuiet;
 }
 
-static int bellwin_random_delay_minutes(int minimumMinutes, int maximumMinutes, uint32_t randomValue) {
+static inline int bellwin_random_delay_minutes(int minimumMinutes, int maximumMinutes, uint32_t randomValue) {
     minimumMinutes = bellwin_clamp_int(minimumMinutes, 30, 480);
     maximumMinutes = bellwin_clamp_int(maximumMinutes, 30, 480);
     if (minimumMinutes > maximumMinutes) {
@@ -121,7 +121,7 @@ static int bellwin_random_delay_minutes(int minimumMinutes, int maximumMinutes, 
     return minimumMinutes + (int)(randomValue % (uint32_t)(maximumMinutes - minimumMinutes + 1));
 }
 
-static int bellwin_set_time_segment(int minuteOfDay, BellwinTimeSegment segment, int value) {
+static inline int bellwin_set_time_segment(int minuteOfDay, BellwinTimeSegment segment, int value) {
     minuteOfDay = bellwin_normalize_day_minute(minuteOfDay);
     int hours = minuteOfDay / 60;
     int minutes = minuteOfDay % 60;
@@ -130,7 +130,7 @@ static int bellwin_set_time_segment(int minuteOfDay, BellwinTimeSegment segment,
     return hours * 60 + minutes;
 }
 
-static int bellwin_step_time_segment(int minuteOfDay, BellwinTimeSegment segment, int delta) {
+static inline int bellwin_step_time_segment(int minuteOfDay, BellwinTimeSegment segment, int delta) {
     minuteOfDay = bellwin_normalize_day_minute(minuteOfDay);
     int hours = minuteOfDay / 60;
     int minutes = minuteOfDay % 60;
@@ -144,11 +144,11 @@ static int bellwin_step_time_segment(int minuteOfDay, BellwinTimeSegment segment
     return hours * 60 + minutes;
 }
 
-static int bellwin_pause_is_active(uint64_t nowTick, uint64_t pauseUntilTick, int pauseIndefinitely) {
+static inline int bellwin_pause_is_active(uint64_t nowTick, uint64_t pauseUntilTick, int pauseIndefinitely) {
     return pauseIndefinitely || (pauseUntilTick != 0 && nowTick < pauseUntilTick);
 }
 
-static int bellwin_timed_pause_is_valid(
+static inline int bellwin_timed_pause_is_valid(
     uint64_t startedUnixSeconds,
     uint64_t untilUnixSeconds,
     int selectedMinutes,
@@ -162,7 +162,7 @@ static int bellwin_timed_pause_is_valid(
         && untilUnixSeconds - startedUnixSeconds == (uint64_t)selectedMinutes * 60ULL;
 }
 
-static void bellwin_format_last_ring(uint64_t elapsedSeconds, wchar_t *buffer, size_t count) {
+static inline void bellwin_format_last_ring(uint64_t elapsedSeconds, wchar_t *buffer, size_t count) {
     if (!buffer || count == 0) return;
 
     if (elapsedSeconds < 10) {

@@ -45,11 +45,66 @@ The output is `Bellwin.exe`, a 32-bit Windows GUI executable targeting Windows
 the executable. Theme support uses only Windows system APIs and does not add a
 runtime or sidecar DLL, so the distributed application remains one executable.
 
-Run the core scheduling and theme-resolution tests with:
+The settings window layout is computed with the vendored
+[Clay](https://github.com/nicbarker/clay) single-header library
+(`thirdparty/clay.h`, pinned at v0.14) and rendered through a small GDI
+backend, so the executable still has no runtime dependencies. The semantic
+widget vocabulary and shared formatting rules live in `widgets.h`; the widget
+table, focus model, hit testing, and input dispatch live in `ui.c`; the
+declarative screen layout and single Clay implementation live in `layout.c`,
+GDI rendering lives in
+`render_gdi.c`, and the native accessibility provider lives in `uia.c`.
+These seams are covered by headless tests.
+
+Run the scheduling, widget, layout, command-line parsing, IPC-message
+validation, and theme-resolution tests with:
 
 ```powershell
 .\nob.exe --test
 ```
+
+## Accessibility and UI Automation
+
+The settings window exposes its semantic controls through the native Windows
+UI Automation provider included with Windows 7 and newer. This makes the UI
+readable by Narrator and scriptable through clients such as Accessibility
+Insights, FlaUI, and pywinauto without adding a runtime dependency.
+
+The three sliders support `RangeValue` plus a read-only, human-formatted
+`Value`. Each quiet-hours field is a group containing separate hour and minute
+spinners with `RangeValue`. **Launch at login** supports `Toggle`, while the
+visible **Install** or **Update** button supports `Invoke`. Automation IDs are
+stable across runs, and focus, value, and toggle changes raise the matching UI
+Automation events.
+
+## Command line automation
+
+The executable is also a command-line client for the running Bellwin instance.
+If Bellwin is not running, an action starts it in the background first. Every
+command returns status `0` on success, writes machine-readable `key=value`
+output to standard output, and writes errors to standard error.
+
+```powershell
+Bellwin.exe --ring
+Bellwin.exe --pause 30        # also 60 or 120
+Bellwin.exe --unpause
+Bellwin.exe --show
+Bellwin.exe --get volume
+Bellwin.exe --set volume=40
+Bellwin.exe --status
+```
+
+Supported setting keys are `volume`, `minimum-interval`, `maximum-interval`,
+`quiet-start`, `quiet-end`, and `autostart`. Volumes use `0` through `100`;
+intervals use 30-minute steps from `30` through `480`; quiet-hour values use
+`HH:MM`; and autostart accepts `on` or `off`. `--status` also reports `pause`,
+`pause-until`, and `last-ring`; timestamps are Unix seconds.
+
+Commands use a versioned, fixed-size `WM_COPYDATA` protocol between the CLI
+process and the single GUI instance. Argument parsing uses the vendored
+[flag.h](https://github.com/tsoding/flag.h) single-header library pinned to
+commit `7d3699298551080678d7763adcdd22e78873f4c4`; its MIT license is stored in
+`thirdparty/flag.LICENSE`. No sidecar DLL or helper executable is required.
 
 ## Windows themes
 
