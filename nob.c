@@ -49,6 +49,20 @@ static bool build_tests(void) {
     );
     if (!nob_cmd_run(&cmd)) return false;
     nob_cmd_append(&cmd, BUILD_FOLDER "core_tests.exe");
+    if (!nob_cmd_run(&cmd)) return false;
+
+    nob_cmd_append(
+        &cmd,
+        "clang", "-target", TARGET, "-fuse-ld=lld",
+        "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601", "-DBELLWIN_THEME_TESTING",
+        "-Wall", "-Wextra", "-Werror",
+        "tests/theme_tests.c", "theme.c",
+        "-o", BUILD_FOLDER "theme_tests.exe",
+        "-Xlinker", "/SUBSYSTEM:CONSOLE,6.01", "-Xlinker", "/OSVERSION:6.1",
+        "-luser32", "-ladvapi32", "-ldwmapi"
+    );
+    if (!nob_cmd_run(&cmd)) return false;
+    nob_cmd_append(&cmd, BUILD_FOLDER "theme_tests.exe");
     return nob_cmd_run(&cmd);
 }
 
@@ -86,7 +100,7 @@ int main(int argc, char **argv) {
         "clang", "-target", TARGET, "-fuse-ld=lld",
         "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601", "-DUNICODE", "-D_UNICODE",
         "-Os", "-Wall", "-Wextra", "-Werror",
-        "main.c", BUILD_FOLDER "version.res", BUILD_FOLDER "resources.res",
+        "main.c", "theme.c", BUILD_FOLDER "version.res", BUILD_FOLDER "resources.res",
         "-o", "Bellwin.exe",
         "-Xlinker", "/SUBSYSTEM:WINDOWS,6.01", "-Xlinker", "/OSVERSION:6.1",
         "-Xlinker", "/ENTRY:mainCRTStartup",

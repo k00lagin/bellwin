@@ -42,13 +42,28 @@ The project follows the single-command native build used by
 
 The output is `Bellwin.exe`, a 32-bit Windows GUI executable targeting Windows
 7 (`6.1`) and newer. The application icon and MP3 bell sound are embedded into
-the executable.
+the executable. Theme support uses only Windows system APIs and does not add a
+runtime or sidecar DLL, so the distributed application remains one executable.
 
-Run the core scheduling tests with:
+Run the core scheduling and theme-resolution tests with:
 
 ```powershell
 .\nob.exe --test
 ```
+
+## Windows themes
+
+Bellwin follows the Windows high-contrast palette on Windows 7 and newer.
+Outside high contrast, it uses the system DWM colorization color as its accent
+when available and falls back to the built-in Bellwin accent if DWM cannot
+provide one.
+
+On Windows 10 and newer, the settings window follows the user's app light/dark
+preference. On Windows 11 build 22000 and newer, the standard title bar follows
+dark mode too. Older systems retain their normal system-drawn title bar. Theme,
+system-color, and accent changes are applied while Bellwin is running. The tray
+menu remains a native Windows menu so the operating system controls its theme
+and accessibility behavior.
 
 ## Installation
 

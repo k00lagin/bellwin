@@ -5,7 +5,6 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <mmsystem.h>
-#include <dwmapi.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +15,7 @@
 #include "core.h"
 #include "rendering.h"
 #include "resource.h"
+#include "theme.h"
 #include "version.h"
 
 #define APP_CLASS L"Bellwin.Settings.Window"
@@ -129,6 +129,7 @@ typedef struct AppState {
     HICON pausedSmallIcon;
     NOTIFYICONDATAW tray;
     BellwinSettings settings;
+    BellwinThemeState theme;
     HFONT titleFont;
     HFONT bodyFont;
     HFONT smallFont;
@@ -758,7 +759,7 @@ static void draw_text(HDC dc, const wchar_t *text, RECT rect, HFONT font, COLORR
 }
 
 static void draw_focus_outline(HDC dc, const RECT *rect, int radius) {
-    HPEN pen = CreatePen(PS_SOLID, px(2), RGB(0, 95, 184));
+    HPEN pen = CreatePen(PS_SOLID, px(2), g_app.theme.palette.focus);
     HGDIOBJ oldPen = SelectObject(dc, pen);
     HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
     RoundRect(dc, rect->left, rect->top, rect->right, rect->bottom, px(radius), px(radius));
@@ -898,11 +899,11 @@ static void draw_slider(PixelSurface *surface, HDC dc, ControlId control, int y,
     int position = left + MulDiv(value - minimum, right - left, maximum - minimum);
     RECT inactive = logical_rect(left, y - 2, right, y + 2);
     RECT active = logical_rect(left, y - 2, position, y + 2);
-    fill_rect_color(dc, &inactive, RGB(210, 213, 218));
-    fill_rect_color(dc, &active, RGB(0, 120, 212));
+    fill_rect_color(dc, &inactive, g_app.theme.palette.inactiveTrack);
+    fill_rect_color(dc, &active, g_app.theme.palette.accent);
 
     if (ticks > 1) {
-        HPEN tickPen = CreatePen(PS_SOLID, px(2), RGB(197, 200, 204));
+        HPEN tickPen = CreatePen(PS_SOLID, px(2), g_app.theme.palette.tick);
         HGDIOBJ oldPen = SelectObject(dc, tickPen);
         for (int i = 0; i < ticks; ++i) {
             int x = left + MulDiv(i, right - left, ticks - 1);
@@ -919,12 +920,12 @@ static void draw_slider(PixelSurface *surface, HDC dc, ControlId control, int y,
         px(y),
         px(10),
         px(3),
-        RGB(255, 255, 255),
-        RGB(0, 120, 212)
+        g_app.theme.palette.knob,
+        g_app.theme.palette.accent
     );
 
     RECT valueRect = logical_rect(590, y - 20, 690, y + 20);
-    draw_text(dc, valueText, valueRect, g_app.bodyFont, RGB(96, 96, 96), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(dc, valueText, valueRect, g_app.bodyFont, g_app.theme.palette.secondaryText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     if (control_has_visible_focus(control)) {
         RECT focus = logical_rect(315, y - 21, 700, y + 21);
         draw_focus_outline(dc, &focus, 6);
@@ -956,25 +957,29 @@ static void draw_triangle(HDC dc, POINT points[3], COLORREF color) {
 static void draw_time_box(HDC dc, ControlId control, int x, int y, int minuteOfDay) {
     RECT box = logical_rect(x, y, x + 110, y + 40);
     int focused = control_has_focus(control);
-    rounded_rect(dc, &box, 3, RGB(255, 255, 255), RGB(194, 196, 200));
+    rounded_rect(dc, &box, 3, g_app.theme.palette.controlBackground, g_app.theme.palette.controlBorder);
 
     RECT hoursRect = logical_rect(x + 6, y + 4, x + 38, y + 36);
     RECT colonRect = logical_rect(x + 38, y + 4, x + 48, y + 36);
     RECT minutesRect = logical_rect(x + 48, y + 4, x + 80, y + 36);
     RECT *selectedRect = g_app.timeEdit.segment == BELLWIN_TIME_HOURS ? &hoursRect : &minutesRect;
-    if (focused) rounded_rect(dc, selectedRect, 3, RGB(0, 120, 212), RGB(0, 120, 212));
+    if (focused) rounded_rect(dc, selectedRect, 3, g_app.theme.palette.accent, g_app.theme.palette.accent);
 
     wchar_t hoursText[3];
     wchar_t minutesText[3];
     swprintf_s(hoursText, 3, L"%02d", minuteOfDay / 60);
     swprintf_s(minutesText, 3, L"%02d", minuteOfDay % 60);
-    COLORREF hoursColor = focused && g_app.timeEdit.segment == BELLWIN_TIME_HOURS ? RGB(255, 255, 255) : RGB(32, 32, 32);
-    COLORREF minutesColor = focused && g_app.timeEdit.segment == BELLWIN_TIME_MINUTES ? RGB(255, 255, 255) : RGB(32, 32, 32);
+    COLORREF hoursColor = focused && g_app.timeEdit.segment == BELLWIN_TIME_HOURS
+        ? g_app.theme.palette.accentText
+        : g_app.theme.palette.controlText;
+    COLORREF minutesColor = focused && g_app.timeEdit.segment == BELLWIN_TIME_MINUTES
+        ? g_app.theme.palette.accentText
+        : g_app.theme.palette.controlText;
     draw_text(dc, hoursText, hoursRect, g_app.bodyFont, hoursColor, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    draw_text(dc, L":", colonRect, g_app.bodyFont, RGB(32, 32, 32), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    draw_text(dc, L":", colonRect, g_app.bodyFont, g_app.theme.palette.controlText, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     draw_text(dc, minutesText, minutesRect, g_app.bodyFont, minutesColor, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    HPEN divider = CreatePen(PS_SOLID, 1, RGB(218, 220, 223));
+    HPEN divider = CreatePen(PS_SOLID, 1, g_app.theme.palette.divider);
     HGDIOBJ oldPen = SelectObject(dc, divider);
     MoveToEx(dc, px(x + 84), px(y), NULL);
     LineTo(dc, px(x + 84), px(y + 40));
@@ -985,14 +990,14 @@ static void draw_time_box(HDC dc, ControlId control, int x, int y, int minuteOfD
 
     POINT up[3] = {{px(x + 91), px(y + 14)}, {px(x + 97), px(y + 8)}, {px(x + 103), px(y + 14)}};
     POINT down[3] = {{px(x + 91), px(y + 26)}, {px(x + 97), px(y + 32)}, {px(x + 103), px(y + 26)}};
-    draw_triangle(dc, up, RGB(80, 80, 80));
-    draw_triangle(dc, down, RGB(80, 80, 80));
+    draw_triangle(dc, up, g_app.theme.palette.controlText);
+    draw_triangle(dc, down, g_app.theme.palette.controlText);
 }
 
 static void draw_toggle(PixelSurface *surface, HDC dc, int x, int y, int on) {
     RECT track = logical_rect(x, y, x + 54, y + 30);
     draw_antialiased_horizontal_capsule(
-        surface, &track, on ? RGB(0, 120, 212) : RGB(145, 149, 154)
+        surface, &track, on ? g_app.theme.palette.accent : g_app.theme.palette.toggleOff
     );
     int knobX = on ? x + 39 : x + 15;
     draw_antialiased_circle(
@@ -1001,8 +1006,8 @@ static void draw_toggle(PixelSurface *surface, HDC dc, int x, int y, int on) {
         px(y + 15),
         px(11),
         0,
-        RGB(255, 255, 255),
-        RGB(255, 255, 255)
+        on ? g_app.theme.palette.knob : g_app.theme.palette.toggleOffKnob,
+        on ? g_app.theme.palette.knob : g_app.theme.palette.toggleOffKnob
     );
     if (control_has_visible_focus(CONTROL_AUTOSTART)) {
         RECT focus = logical_rect(x - 5, y - 5, x + 59, y + 35);
@@ -1013,14 +1018,16 @@ static void draw_toggle(PixelSurface *surface, HDC dc, int x, int y, int on) {
 static void draw_install_button(HDC dc) {
     if (!g_app.showInstall) return;
     RECT button = logical_rect(INSTALL_LEFT, INSTALL_TOP, INSTALL_RIGHT, INSTALL_BOTTOM);
-    COLORREF fill = g_app.hoverInstall ? RGB(229, 241, 251) : RGB(255, 255, 255);
-    rounded_rect(dc, &button, 5, fill, RGB(145, 149, 154));
+    COLORREF fill = g_app.hoverInstall
+        ? g_app.theme.palette.hoverBackground
+        : g_app.theme.palette.controlBackground;
+    rounded_rect(dc, &button, 5, fill, g_app.theme.palette.controlBorder);
     draw_text(
         dc,
         g_app.updateAvailable ? L"Update" : L"Install",
         button,
         g_app.smallFont,
-        RGB(32, 32, 32),
+        g_app.theme.palette.controlText,
         DT_CENTER | DT_VCENTER | DT_SINGLELINE
     );
     if (control_has_visible_focus(CONTROL_INSTALL)) draw_focus_outline(dc, &button, 5);
@@ -1056,7 +1063,13 @@ static void draw_update_tooltip(HDC dc) {
         px(INSTALL_RIGHT),
         px(INSTALL_TOP) - gap,
     };
-    rounded_rect(dc, &tooltip, 4, RGB(255, 255, 225), RGB(118, 118, 118));
+    rounded_rect(
+        dc,
+        &tooltip,
+        4,
+        g_app.theme.palette.tooltipBackground,
+        g_app.theme.palette.tooltipBorder
+    );
     RECT content = tooltip;
     InflateRect(&content, -horizontalPadding, -verticalPadding);
     draw_text(
@@ -1064,7 +1077,7 @@ static void draw_update_tooltip(HDC dc) {
         text,
         content,
         g_app.smallFont,
-        RGB(32, 32, 32),
+        g_app.theme.palette.tooltipText,
         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX
     );
 }
@@ -1093,20 +1106,20 @@ static void paint_ui(HWND window) {
         .height = client.bottom,
     };
 
-    fill_rect_color(dc, &client, RGB(243, 243, 243));
+    fill_rect_color(dc, &client, g_app.theme.palette.windowBackground);
 
     RECT title = logical_rect(0, 18, 760, 55);
-    draw_text(dc, L"Settings", title, g_app.titleFont, RGB(50, 50, 50), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    draw_text(dc, L"Settings", title, g_app.titleFont, g_app.theme.palette.primaryText, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     RECT card = logical_rect(40, 72, 720, 355);
-    rounded_rect(dc, &card, 12, RGB(251, 251, 251), RGB(225, 225, 225));
+    rounded_rect(dc, &card, 12, g_app.theme.palette.cardBackground, g_app.theme.palette.cardBorder);
 
     RECT label = logical_rect(78, 101, 310, 143);
-    draw_text(dc, L"Bell volume", label, g_app.bodyFont, RGB(32, 32, 32), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(dc, L"Bell volume", label, g_app.bodyFont, g_app.theme.palette.primaryText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     label = logical_rect(78, 157, 310, 199);
-    draw_text(dc, L"Ring every", label, g_app.bodyFont, RGB(32, 32, 32), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(dc, L"Ring every", label, g_app.bodyFont, g_app.theme.palette.primaryText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     label = logical_rect(78, 213, 310, 255);
-    draw_text(dc, L"to", label, g_app.bodyFont, RGB(32, 32, 32), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(dc, L"to", label, g_app.bodyFont, g_app.theme.palette.primaryText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     wchar_t valueText[32];
     swprintf_s(valueText, 32, L"%d%%", g_app.settings.volume);
@@ -1117,16 +1130,16 @@ static void paint_ui(HWND window) {
     draw_slider(&surface, dc, CONTROL_MAXIMUM_INTERVAL, MAXIMUM_SLIDER_Y, g_app.settings.maximumMinutes, 30, 480, 16, valueText);
 
     RECT divider = logical_rect(78, 271, 682, 272);
-    fill_rect_color(dc, &divider, RGB(220, 220, 220));
+    fill_rect_color(dc, &divider, g_app.theme.palette.divider);
     label = logical_rect(78, 291, 310, 333);
-    draw_text(dc, L"Quiet hours", label, g_app.bodyFont, RGB(32, 32, 32), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(dc, L"Quiet hours", label, g_app.bodyFont, g_app.theme.palette.primaryText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     draw_time_box(dc, CONTROL_QUIET_START, QUIET_START_X, QUIET_TIME_Y, g_app.settings.quietStartMinutes);
     RECT ellipsis = logical_rect(446, 292, 474, 332);
-    draw_text(dc, L"…", ellipsis, g_app.bodyFont, RGB(100, 100, 100), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    draw_text(dc, L"…", ellipsis, g_app.bodyFont, g_app.theme.palette.secondaryText, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     draw_time_box(dc, CONTROL_QUIET_END, QUIET_END_X, QUIET_TIME_Y, g_app.settings.quietEndMinutes);
 
     label = logical_rect(40, 379, 185, 431);
-    draw_text(dc, L"Launch at login", label, g_app.bodyFont, RGB(32, 32, 32), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    draw_text(dc, L"Launch at login", label, g_app.bodyFont, g_app.theme.palette.primaryText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     draw_toggle(&surface, dc, TOGGLE_X, TOGGLE_Y, g_app.autoStart);
     draw_install_button(dc);
     draw_update_tooltip(dc);
@@ -1557,6 +1570,14 @@ static void show_window(void) {
     SetFocus(g_app.window);
 }
 
+static void refresh_theme_state(HWND window) {
+    BellwinThemeState nextTheme = bellwin_query_theme();
+    if (bellwin_theme_equal(&g_app.theme, &nextTheme)) return;
+    g_app.theme = nextTheme;
+    bellwin_apply_window_frame(window, &g_app.theme);
+    InvalidateRect(window, NULL, FALSE);
+}
+
 static void show_tray_menu(void) {
     POINT point;
     GetCursorPos(&point);
@@ -1615,6 +1636,12 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
     }
 
     switch (message) {
+    case WM_DWMCOLORIZATIONCOLORCHANGED:
+    case WM_SYSCOLORCHANGE:
+    case WM_THEMECHANGED:
+    case WM_SETTINGCHANGE:
+        refresh_theme_state(window);
+        return 0;
     case WM_PAINT:
         paint_ui(window);
         return 0;
@@ -1989,6 +2016,7 @@ int main(void) {
     load_settings();
     g_app.autoStart = is_autostart_enabled();
     refresh_install_state();
+    g_app.theme = bellwin_query_theme();
     srand((unsigned)(time(NULL) ^ GetTickCount() ^ GetCurrentProcessId()));
 
     g_app.largeIcon = (HICON)LoadImageW(g_app.instance, MAKEINTRESOURCEW(IDI_BELLWIN), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
@@ -2036,8 +2064,7 @@ int main(void) {
     y = monitorInfo.rcWork.top + (monitorInfo.rcWork.bottom - monitorInfo.rcWork.top - height) / 2;
     SetWindowPos(g_app.window, NULL, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
     create_fonts();
-    int cornerPreference = 2;
-    DwmSetWindowAttribute(g_app.window, 33, &cornerPreference, sizeof(cornerPreference));
+    bellwin_apply_window_frame(g_app.window, &g_app.theme);
     g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     add_tray_icon();
     if (!extract_sound()) {
