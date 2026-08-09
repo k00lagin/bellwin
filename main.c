@@ -64,6 +64,7 @@ AppState g_app;
 static UINT g_taskbarCreated;
 
 static void update_tray_state(void);
+
 int app_px(int logical) {
     return MulDiv(logical, g_app.dpi, 96);
 }
@@ -659,6 +660,7 @@ static int change_autostart(int desired) {
     int oldValue = g_app.autoStart;
     if (set_autostart(desired)) {
         g_app.autoStart = desired;
+        ui_set_toggle_checked_visual(desired);
         InvalidateRect(g_app.window, NULL, FALSE);
         uia_notify_toggle(oldValue, desired);
         return 1;
@@ -1104,6 +1106,15 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
     case WM_THEMECHANGED:
     case WM_SETTINGCHANGE:
         refresh_theme_state(window);
+        ui_refresh_animation_policy();
+        return 0;
+    case WM_SHOWWINDOW:
+        if (!wParam && g_app.uiMotionInitialized) {
+            bellwin_toggle_pointer_cancel(&g_app.togglePointer);
+            finish_slider_drag();
+            if (GetCapture() == window) ReleaseCapture();
+            ui_reset_motion_for_hidden_window();
+        }
         return 0;
     case WM_PAINT:
         paint_ui(window);
@@ -1146,6 +1157,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         update_pointer_state(x, y, 1);
 
         HitInfo hit = hit_test_pointer(x, y);
+        ui_update_hover_from_hit(hit);
         switch (hit.kind) {
         case HIT_SLIDER: {
             focus_control(hit.control, FOCUS_HIDDEN);
@@ -1155,6 +1167,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
                 && x >= track.boundingBox.x - inflate
                 && x < track.boundingBox.x + track.boundingBox.width + inflate) {
                 g_app.draggingSlider = hit.control;
+                ui_begin_pointer_press(hit);
                 SetCapture(window);
                 update_slider_from_mouse(widget_by_id(hit.control), x);
             }
@@ -1166,11 +1179,15 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
             return 0;
         case HIT_TIME_STEPPER:
             focus_control(hit.control, FOCUS_HIDDEN);
+            ui_begin_pointer_press(hit);
+            SetCapture(window);
             shift_time_minutes(widget_by_id(hit.control), hit.stepperUp ? 30 : -30);
             return 0;
         case HIT_TOGGLE:
             focus_control(CONTROL_AUTOSTART, FOCUS_HIDDEN);
-            invoke_widget(CONTROL_AUTOSTART);
+            bellwin_toggle_pointer_begin(&g_app.togglePointer, g_app.autoStart);
+            ui_begin_pointer_press(hit);
+            SetCapture(window);
             return 0;
         case HIT_INSTALL:
             focus_control(CONTROL_INSTALL, FOCUS_HIDDEN);
@@ -1194,11 +1211,13 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         }
         float x = (float)GET_X_LPARAM(lParam);
         float y = (float)GET_Y_LPARAM(lParam);
-        update_pointer_state(x, y, g_app.draggingSlider != CONTROL_NONE);
+        int pointerDown = g_app.draggingSlider != CONTROL_NONE
+            || g_app.pressedPointer.control != CONTROL_NONE;
+        update_pointer_state(x, y, pointerDown);
+        HitInfo hit = hit_test_pointer(x, y);
+        ui_update_hover_from_hit(hit);
         if (g_app.draggingSlider) update_slider_from_mouse(widget_by_id(g_app.draggingSlider), x);
-        int hover = g_app.showInstall
-            && bellwin_ui_is_ready()
-            && Clay_PointerOver(bellwin_ui_hit_id(CONTROL_INSTALL));
+        int hover = g_app.showInstall && hit.kind == HIT_INSTALL;
         if (hover != g_app.hoverInstall) {
             g_app.hoverInstall = hover;
             InvalidateRect(window, NULL, FALSE);
@@ -1207,19 +1226,54 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
     }
     case WM_MOUSELEAVE:
         g_app.trackingMouseLeave = 0;
+        ui_update_hover_from_hit((HitInfo){0});
         if (g_app.hoverInstall) {
             g_app.hoverInstall = 0;
             InvalidateRect(window, NULL, FALSE);
         }
         return 0;
-    case WM_LBUTTONUP:
+    case WM_LBUTTONUP: {
+        float x = (float)GET_X_LPARAM(lParam);
+        float y = (float)GET_Y_LPARAM(lParam);
+        update_pointer_state(x, y, 0);
+        HitInfo hit = hit_test_pointer(x, y);
+        ui_update_hover_from_hit(hit);
+
+        int desiredToggle = g_app.autoStart;
+        BellwinTogglePointerResult toggleResult = bellwin_toggle_pointer_release(
+            &g_app.togglePointer,
+            hit.kind == HIT_TOGGLE && hit.control == CONTROL_AUTOSTART,
+            &desiredToggle
+        );
+
         if (g_app.draggingSlider) {
             finish_slider_drag();
-            ReleaseCapture();
+        }
+        ui_end_pointer_press();
+        if (GetCapture() == window) ReleaseCapture();
+
+        if (toggleResult == BELLWIN_TOGGLE_POINTER_COMMIT) {
+            if (!change_autostart(desiredToggle)) {
+                ui_cancel_toggle_visual();
+                MessageBoxW(
+                    window,
+                    L"Could not change the startup setting.",
+                    APP_NAME,
+                    MB_OK | MB_ICONERROR
+                );
+            }
+        } else if (toggleResult == BELLWIN_TOGGLE_POINTER_CANCEL) {
+            ui_cancel_toggle_visual();
         }
         return 0;
+    }
     case WM_CAPTURECHANGED:
         finish_slider_drag();
+        if (bellwin_toggle_pointer_cancel(&g_app.togglePointer)
+            == BELLWIN_TOGGLE_POINTER_CANCEL) {
+            ui_cancel_toggle_visual();
+        }
+        ui_end_pointer_press();
         return 0;
     case WM_MOUSEWHEEL: {
         float x;
@@ -1292,6 +1346,10 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         return 0;
     }
     case WM_TIMER:
+        if (wParam == BELLWIN_UI_ANIMATION_TIMER_ID) {
+            ui_animation_tick();
+            return 0;
+        }
         if (wParam == TIMER_TRAY_SINGLE_CLICK) {
             KillTimer(window, TIMER_TRAY_SINGLE_CLICK);
             show_tray_menu();
@@ -1407,6 +1465,8 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         KillTimer(window, TIMER_SCHEDULE);
         KillTimer(window, TIMER_VOLUME_PREVIEW);
         KillTimer(window, TIMER_TRAY_SINGLE_CLICK);
+        KillTimer(window, BELLWIN_UI_ANIMATION_TIMER_ID);
+        g_app.uiAnimationTimerActive = 0;
         remove_tray_icon();
         mciSendStringW(L"close bellwin_sound", NULL, 0, NULL);
         delete_fonts();
@@ -1703,6 +1763,7 @@ int main(int argc, char **argv) {
         NULL, NULL, g_app.instance, NULL
     );
     if (!g_app.window) return 1;
+    ui_initialize_motion();
 
     g_app.dpi = (int)current_dpi(g_app.window);
     RECT adjusted = {0, 0, px(760), px(407)};

@@ -79,6 +79,7 @@ typedef struct BellwinTimeBoxMetrics {
 
 const BellwinUiCustom *bellwin_ui_custom_for(ControlId control);
 Clay_ElementId bellwin_ui_hit_id(ControlId control);
+Clay_ElementId bellwin_ui_visual_id(ControlId control);
 Clay_ElementId bellwin_ui_track_id(ControlId control);
 Clay_ElementId bellwin_ui_tooltip_id(void);
 BellwinTimeBoxMetrics bellwin_time_box_metrics(Clay_BoundingBox box, float scale);

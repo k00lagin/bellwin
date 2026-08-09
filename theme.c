@@ -45,6 +45,55 @@ static COLORREF bellwin_contrasting_text(COLORREF background) {
         : white;
 }
 
+static COLORREF bellwin_blend_color(COLORREF base, COLORREF overlay, BYTE overlayAlpha) {
+    unsigned int baseWeight = 255U - overlayAlpha;
+    BYTE red = (BYTE)((GetRValue(base) * baseWeight
+        + GetRValue(overlay) * overlayAlpha + 127U) / 255U);
+    BYTE green = (BYTE)((GetGValue(base) * baseWeight
+        + GetGValue(overlay) * overlayAlpha + 127U) / 255U);
+    BYTE blue = (BYTE)((GetBValue(base) * baseWeight
+        + GetBValue(overlay) * overlayAlpha + 127U) / 255U);
+    return RGB(red, green, blue);
+}
+
+static int bellwin_has_control_contrast(
+    const BellwinThemePalette *palette,
+    COLORREF color
+) {
+    return bellwin_contrast_ratio(color, palette->windowBackground) >= 3.0
+        && bellwin_contrast_ratio(color, palette->cardBackground) >= 3.0;
+}
+
+static COLORREF bellwin_accent_foreground(COLORREF accent) {
+    COLORREF white = RGB(255, 255, 255);
+    return bellwin_contrast_ratio(accent, white) >= 3.0
+        ? white
+        : RGB(0, 0, 0);
+}
+
+static void bellwin_apply_accent_control_tokens(BellwinThemePalette *palette) {
+    COLORREF active = bellwin_has_control_contrast(palette, palette->accent)
+        ? palette->accent
+        : RGB(0, 120, 212);
+    COLORREF hover = bellwin_blend_color(active, RGB(255, 255, 255), 15);
+    COLORREF pressed = bellwin_relative_luminance(palette->windowBackground) < 0.5
+        ? bellwin_blend_color(active, RGB(255, 255, 255), 28)
+        : bellwin_blend_color(active, RGB(0, 0, 0), 28);
+    if (!bellwin_has_control_contrast(palette, hover)) hover = active;
+    if (!bellwin_has_control_contrast(palette, pressed)) pressed = active;
+
+    palette->sliderTrackActive = active;
+    palette->sliderTrackActiveHover = hover;
+    palette->sliderTrackActivePressed = pressed;
+    palette->sliderThumbInner = active;
+    palette->sliderThumbInnerHover = hover;
+    palette->sliderThumbInnerPressed = pressed;
+    palette->toggleTrackOnFill = active;
+    palette->toggleTrackOnFillHover = hover;
+    palette->toggleTrackOnFillPressed = pressed;
+    palette->toggleThumbOn = bellwin_accent_foreground(active);
+}
+
 static BellwinThemePalette bellwin_dark_palette(void) {
     BellwinThemePalette palette = {
         .windowBackground = RGB(32, 32, 32),
@@ -59,15 +108,34 @@ static BellwinThemePalette bellwin_dark_palette(void) {
         .accent = RGB(0, 120, 212),
         .accentText = RGB(255, 255, 255),
         .focus = RGB(96, 205, 255),
-        .inactiveTrack = RGB(91, 91, 91),
-        .tick = RGB(112, 112, 112),
-        .toggleOff = RGB(112, 112, 112),
-        .knob = RGB(255, 255, 255),
-        .toggleOffKnob = RGB(255, 255, 255),
         .hoverBackground = RGB(58, 58, 58),
         .tooltipBackground = RGB(55, 55, 55),
         .tooltipBorder = RGB(130, 130, 130),
         .tooltipText = RGB(242, 242, 242),
+        .stepperHoverFill = RGB(64, 64, 64),
+        .stepperPressedFill = RGB(73, 73, 73),
+        .controlGlyphSecondary = RGB(190, 190, 190),
+        .controlGlyphHover = RGB(190, 190, 190),
+        .controlGlyphPressed = RGB(242, 242, 242),
+        .sliderTrackInactive = RGB(161, 161, 161),
+        .sliderTrackActive = RGB(0, 120, 212),
+        .sliderTrackActiveHover = RGB(15, 128, 215),
+        .sliderTrackActivePressed = RGB(28, 135, 217),
+        .sliderTick = RGB(119, 119, 119),
+        .sliderThumbSurface = RGB(48, 48, 48),
+        .sliderThumbBorder = RGB(68, 68, 68),
+        .sliderThumbInner = RGB(0, 120, 212),
+        .sliderThumbInnerHover = RGB(15, 128, 215),
+        .sliderThumbInnerPressed = RGB(28, 135, 217),
+        .toggleTrackOffFill = RGB(29, 29, 29),
+        .toggleTrackOffFillHover = RGB(42, 42, 42),
+        .toggleTrackOffFillPressed = RGB(48, 48, 48),
+        .toggleTrackOffStroke = RGB(154, 154, 154),
+        .toggleTrackOnFill = RGB(0, 120, 212),
+        .toggleTrackOnFillHover = RGB(15, 128, 215),
+        .toggleTrackOnFillPressed = RGB(28, 135, 217),
+        .toggleThumbOff = RGB(154, 154, 154),
+        .toggleThumbOn = RGB(255, 255, 255),
     };
     return palette;
 }
@@ -86,15 +154,34 @@ static BellwinThemePalette bellwin_high_contrast_palette(const BellwinSystemColo
         .accent = colors->highlight,
         .accentText = colors->highlightText,
         .focus = colors->highlight,
-        .inactiveTrack = colors->buttonText,
-        .tick = colors->grayText,
-        .toggleOff = colors->buttonText,
-        .knob = colors->highlightText,
-        .toggleOffKnob = colors->buttonFace,
         .hoverBackground = colors->buttonFace,
         .tooltipBackground = colors->window,
         .tooltipBorder = colors->windowText,
         .tooltipText = colors->windowText,
+        .stepperHoverFill = colors->highlight,
+        .stepperPressedFill = colors->buttonText,
+        .controlGlyphSecondary = colors->grayText,
+        .controlGlyphHover = colors->highlightText,
+        .controlGlyphPressed = colors->buttonFace,
+        .sliderTrackInactive = colors->buttonText,
+        .sliderTrackActive = colors->highlight,
+        .sliderTrackActiveHover = colors->highlight,
+        .sliderTrackActivePressed = colors->highlight,
+        .sliderTick = colors->grayText,
+        .sliderThumbSurface = colors->buttonFace,
+        .sliderThumbBorder = colors->buttonText,
+        .sliderThumbInner = colors->highlight,
+        .sliderThumbInnerHover = colors->highlight,
+        .sliderThumbInnerPressed = colors->highlight,
+        .toggleTrackOffFill = colors->buttonFace,
+        .toggleTrackOffFillHover = colors->buttonFace,
+        .toggleTrackOffFillPressed = colors->buttonFace,
+        .toggleTrackOffStroke = colors->buttonText,
+        .toggleTrackOnFill = colors->highlight,
+        .toggleTrackOnFillHover = colors->highlight,
+        .toggleTrackOnFillPressed = colors->highlight,
+        .toggleThumbOff = colors->buttonText,
+        .toggleThumbOn = colors->highlightText,
     };
     return palette;
 }
@@ -115,15 +202,34 @@ BellwinThemeState bellwin_resolve_theme(const BellwinThemeInputs *inputs) {
             .accent = RGB(0, 120, 212),
             .accentText = RGB(255, 255, 255),
             .focus = RGB(0, 95, 184),
-            .inactiveTrack = RGB(210, 213, 218),
-            .tick = RGB(197, 200, 204),
-            .toggleOff = RGB(145, 149, 154),
-            .knob = RGB(255, 255, 255),
-            .toggleOffKnob = RGB(255, 255, 255),
             .hoverBackground = RGB(229, 241, 251),
             .tooltipBackground = RGB(255, 255, 225),
             .tooltipBorder = RGB(118, 118, 118),
             .tooltipText = RGB(32, 32, 32),
+            .stepperHoverFill = RGB(241, 241, 241),
+            .stepperPressedFill = RGB(231, 231, 231),
+            .controlGlyphSecondary = RGB(96, 96, 96),
+            .controlGlyphHover = RGB(96, 96, 96),
+            .controlGlyphPressed = RGB(32, 32, 32),
+            .sliderTrackInactive = RGB(142, 142, 142),
+            .sliderTrackActive = RGB(0, 120, 212),
+            .sliderTrackActiveHover = RGB(15, 128, 215),
+            .sliderTrackActivePressed = RGB(0, 107, 189),
+            .sliderTick = RGB(169, 169, 169),
+            .sliderThumbSurface = RGB(255, 255, 255),
+            .sliderThumbBorder = RGB(225, 225, 225),
+            .sliderThumbInner = RGB(0, 120, 212),
+            .sliderThumbInnerHover = RGB(15, 128, 215),
+            .sliderThumbInnerPressed = RGB(0, 107, 189),
+            .toggleTrackOffFill = RGB(237, 237, 237),
+            .toggleTrackOffFillHover = RGB(229, 229, 229),
+            .toggleTrackOffFillPressed = RGB(220, 220, 220),
+            .toggleTrackOffStroke = RGB(134, 134, 134),
+            .toggleTrackOnFill = RGB(0, 120, 212),
+            .toggleTrackOnFillHover = RGB(15, 128, 215),
+            .toggleTrackOnFillPressed = RGB(0, 107, 189),
+            .toggleThumbOff = RGB(134, 134, 134),
+            .toggleThumbOn = RGB(255, 255, 255),
         },
         .windows11FrameSupported = inputs->windows11FrameSupported,
     };
@@ -144,6 +250,7 @@ BellwinThemeState bellwin_resolve_theme(const BellwinThemeInputs *inputs) {
         );
     }
     theme.palette.accentText = bellwin_contrasting_text(theme.palette.accent);
+    bellwin_apply_accent_control_tokens(&theme.palette);
     if (bellwin_contrast_ratio(theme.palette.accent, theme.palette.windowBackground) >= 3.0
         && bellwin_contrast_ratio(theme.palette.accent, theme.palette.cardBackground) >= 3.0) {
         theme.palette.focus = theme.palette.accent;
@@ -167,15 +274,34 @@ static int bellwin_palette_equal(
         && left->accent == right->accent
         && left->accentText == right->accentText
         && left->focus == right->focus
-        && left->inactiveTrack == right->inactiveTrack
-        && left->tick == right->tick
-        && left->toggleOff == right->toggleOff
-        && left->knob == right->knob
-        && left->toggleOffKnob == right->toggleOffKnob
         && left->hoverBackground == right->hoverBackground
         && left->tooltipBackground == right->tooltipBackground
         && left->tooltipBorder == right->tooltipBorder
-        && left->tooltipText == right->tooltipText;
+        && left->tooltipText == right->tooltipText
+        && left->stepperHoverFill == right->stepperHoverFill
+        && left->stepperPressedFill == right->stepperPressedFill
+        && left->controlGlyphSecondary == right->controlGlyphSecondary
+        && left->controlGlyphHover == right->controlGlyphHover
+        && left->controlGlyphPressed == right->controlGlyphPressed
+        && left->sliderTrackInactive == right->sliderTrackInactive
+        && left->sliderTrackActive == right->sliderTrackActive
+        && left->sliderTrackActiveHover == right->sliderTrackActiveHover
+        && left->sliderTrackActivePressed == right->sliderTrackActivePressed
+        && left->sliderTick == right->sliderTick
+        && left->sliderThumbSurface == right->sliderThumbSurface
+        && left->sliderThumbBorder == right->sliderThumbBorder
+        && left->sliderThumbInner == right->sliderThumbInner
+        && left->sliderThumbInnerHover == right->sliderThumbInnerHover
+        && left->sliderThumbInnerPressed == right->sliderThumbInnerPressed
+        && left->toggleTrackOffFill == right->toggleTrackOffFill
+        && left->toggleTrackOffFillHover == right->toggleTrackOffFillHover
+        && left->toggleTrackOffFillPressed == right->toggleTrackOffFillPressed
+        && left->toggleTrackOffStroke == right->toggleTrackOffStroke
+        && left->toggleTrackOnFill == right->toggleTrackOnFill
+        && left->toggleTrackOnFillHover == right->toggleTrackOnFillHover
+        && left->toggleTrackOnFillPressed == right->toggleTrackOnFillPressed
+        && left->toggleThumbOff == right->toggleThumbOff
+        && left->toggleThumbOn == right->toggleThumbOn;
 }
 
 int bellwin_theme_equal(const BellwinThemeState *left, const BellwinThemeState *right) {

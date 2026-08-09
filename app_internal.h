@@ -9,6 +9,7 @@
 #include "core.h"
 #include "layout.h"
 #include "theme.h"
+#include "ui_motion.h"
 #include "widgets.h"
 
 #define APP_CLASS L"Bellwin.Settings.Window"
@@ -74,9 +75,18 @@ typedef struct AppState {
     FocusVisibility focusVisibility;
     TimeEditState timeEdit;
     WheelState wheel;
+    UiPointerState hoveredPointer;
+    UiPointerState pressedPointer;
+    UiPartMotion partMotions[UI_MOTION_SLOT_COUNT];
+    BellwinUiMotionValue toggleStateMotion;
+    BellwinUiSwitchMotion toggleMotion;
+    BellwinTogglePointerInteraction togglePointer;
     int windowFocused;
     int hoverInstall;
     int trackingMouseLeave;
+    int uiMotionInitialized;
+    int uiAnimationsEnabled;
+    int uiAnimationTimerActive;
     int autoStart;
     int showInstall;
     int updateAvailable;

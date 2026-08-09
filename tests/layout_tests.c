@@ -147,6 +147,45 @@ static void test_pointer_hits_volume_row(void) {
     assert(!Clay_PointerOver(bellwin_ui_hit_id(CONTROL_MINIMUM_INTERVAL)));
 }
 
+static void assert_autostart_composite_target(float scale, float width, float height) {
+    assert(bellwin_ui_initialize(width, height));
+    BellwinUiFrame frame = test_frame(scale);
+    bellwin_ui_build(&frame);
+    Clay_BoundingBox target = box_of(bellwin_ui_hit_id(CONTROL_AUTOSTART));
+    Clay_BoundingBox visual = box_of(bellwin_ui_visual_id(CONTROL_AUTOSTART));
+
+    /* The label, 12 epx gap, and 40 epx switch visual form one target. */
+    assert(bellwin_ui_hit_id(CONTROL_AUTOSTART).id
+        != bellwin_ui_visual_id(CONTROL_AUTOSTART).id);
+    assert(fabsf(target.width - 197.0f * scale) < 0.5f);
+    assert(fabsf(target.height - 40.0f * scale) < 0.5f);
+    assert(fabsf(visual.width - 40.0f * scale) < 0.5f);
+    assert(fabsf(visual.height - 20.0f * scale) < 0.5f);
+    assert(fabsf(visual.x - target.x - 157.0f * scale) < 0.5f);
+    assert(fabsf(
+        visual.y + visual.height / 2.0f - target.y - target.height / 2.0f
+    ) < 0.5f);
+    assert(box_inside(visual, target));
+
+    Clay_Vector2 labelPoint = {target.x + 4.0f * scale, target.y + target.height / 2.0f};
+    Clay_SetPointerState(labelPoint, false);
+    assert(Clay_PointerOver(bellwin_ui_hit_id(CONTROL_AUTOSTART)));
+
+    Clay_Vector2 gapPoint = {target.x + 151.0f * scale, target.y + target.height / 2.0f};
+    Clay_SetPointerState(gapPoint, false);
+    assert(Clay_PointerOver(bellwin_ui_hit_id(CONTROL_AUTOSTART)));
+
+    Clay_Vector2 visualPoint = {visual.x + visual.width / 2.0f, visual.y + visual.height / 2.0f};
+    Clay_SetPointerState(visualPoint, false);
+    assert(Clay_PointerOver(bellwin_ui_hit_id(CONTROL_AUTOSTART)));
+}
+
+static void test_autostart_composite_hit_target(void) {
+    assert_autostart_composite_target(1.0f, 760.0f, 407.0f);
+    assert_autostart_composite_target(2.0f, 1520.0f, 814.0f);
+    assert(bellwin_ui_initialize(760.0f, 407.0f));
+}
+
 static void test_time_box_metrics(void) {
     Clay_BoundingBox box = {0.0f, 0.0f, 110.0f, 40.0f};
     BellwinTimeBoxMetrics metrics = bellwin_time_box_metrics(box, 1.0f);
@@ -189,6 +228,7 @@ int main(void) {
     test_install_button_visibility();
     test_update_tooltip();
     test_pointer_hits_volume_row();
+    test_autostart_composite_hit_target();
     test_time_box_metrics();
     test_slider_value_from_position();
     test_interval_formatting();

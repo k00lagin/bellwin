@@ -160,6 +160,247 @@ HitInfo hit_test_pointer(float x, float y) {
     return hit;
 }
 
+static int ui_pointer_state_equal(UiPointerState left, UiPointerState right) {
+    return left.control == right.control && left.part == right.part;
+}
+
+static UiPointerState ui_pointer_state_from_hit(HitInfo hit) {
+    UiPointerState state = {CONTROL_NONE, UI_PART_NONE};
+    state.control = hit.control;
+    if (hit.kind == HIT_SLIDER) state.part = UI_PART_SLIDER;
+    else if (hit.kind == HIT_TIME_STEPPER) {
+        state.part = hit.stepperUp ? UI_PART_TIME_UP : UI_PART_TIME_DOWN;
+    } else if (hit.kind == HIT_TOGGLE) state.part = UI_PART_TOGGLE;
+    else state.control = CONTROL_NONE;
+    return state;
+}
+
+static int ui_animation_policy_enabled(void) {
+    BOOL enabled = TRUE;
+    if (!SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0)) {
+        enabled = TRUE;
+    }
+    return enabled && g_app.theme.mode != BELLWIN_THEME_HIGH_CONTRAST;
+}
+
+static int ui_motion_allowed(void) {
+    return g_app.uiMotionInitialized
+        && g_app.uiAnimationsEnabled
+        && g_app.window
+        && IsWindowVisible(g_app.window);
+}
+
+static int ui_any_motion_active(void) {
+    if (!g_app.uiMotionInitialized) return 0;
+    for (int i = 0; i < UI_MOTION_SLOT_COUNT; ++i) {
+        if (g_app.partMotions[i].hover.active
+            || g_app.partMotions[i].pressed.active) return 1;
+    }
+    return g_app.toggleStateMotion.active
+        || bellwin_ui_switch_motion_active(&g_app.toggleMotion);
+}
+
+static void ui_finish_all_motion(void) {
+    if (!g_app.uiMotionInitialized) return;
+    for (int i = 0; i < UI_MOTION_SLOT_COUNT; ++i) {
+        bellwin_ui_motion_finish(&g_app.partMotions[i].hover);
+        bellwin_ui_motion_finish(&g_app.partMotions[i].pressed);
+    }
+    bellwin_ui_motion_finish(&g_app.toggleStateMotion);
+    bellwin_ui_switch_motion_finish(&g_app.toggleMotion);
+    if (g_app.uiAnimationTimerActive && g_app.window) {
+        KillTimer(g_app.window, BELLWIN_UI_ANIMATION_TIMER_ID);
+        g_app.uiAnimationTimerActive = 0;
+    }
+}
+
+static void ui_sync_animation_timer(void) {
+    int active = ui_any_motion_active();
+    if (active && !g_app.uiAnimationTimerActive && g_app.window) {
+        if (SetTimer(g_app.window, BELLWIN_UI_ANIMATION_TIMER_ID, 16, NULL)) {
+            g_app.uiAnimationTimerActive = 1;
+        } else {
+            ui_finish_all_motion();
+        }
+    } else if (!active && g_app.uiAnimationTimerActive && g_app.window) {
+        KillTimer(g_app.window, BELLWIN_UI_ANIMATION_TIMER_ID);
+        g_app.uiAnimationTimerActive = 0;
+    }
+}
+
+static void ui_motion_changed(void) {
+    if (g_app.window) InvalidateRect(g_app.window, NULL, FALSE);
+    ui_sync_animation_timer();
+}
+
+static uint32_t ui_slot_duration(int slot, int entering) {
+    if (slot >= UI_MOTION_VOLUME_SLIDER && slot <= UI_MOTION_MAXIMUM_SLIDER) {
+        return entering ? BELLWIN_UI_MOTION_NORMAL_MS : BELLWIN_UI_MOTION_FAST_MS;
+    }
+    return BELLWIN_UI_MOTION_FASTER_MS;
+}
+
+static void ui_set_hovered_pointer(UiPointerState state) {
+    if (!g_app.uiMotionInitialized
+        || ui_pointer_state_equal(g_app.hoveredPointer, state)) return;
+
+    g_app.hoveredPointer = state;
+    int selectedSlot = ui_motion_slot_for(state.control, state.part);
+    uint64_t now = GetTickCount64();
+    int animate = ui_motion_allowed();
+    for (int slot = 0; slot < UI_MOTION_SLOT_COUNT; ++slot) {
+        int selected = slot == selectedSlot;
+        bellwin_ui_motion_start(
+            &g_app.partMotions[slot].hover,
+            selected ? 1.0f : 0.0f,
+            now,
+            ui_slot_duration(slot, selected),
+            animate
+        );
+    }
+    bellwin_ui_switch_motion_set_hover(
+        &g_app.toggleMotion,
+        selectedSlot == UI_MOTION_AUTOSTART,
+        now,
+        animate
+    );
+    ui_motion_changed();
+}
+
+void ui_update_hover_from_hit(HitInfo hit) {
+    ui_set_hovered_pointer(ui_pointer_state_from_hit(hit));
+}
+
+static void ui_set_pressed_pointer(UiPointerState state) {
+    if (!g_app.uiMotionInitialized
+        || ui_pointer_state_equal(g_app.pressedPointer, state)) return;
+
+    g_app.pressedPointer = state;
+    int selectedSlot = ui_motion_slot_for(state.control, state.part);
+    uint64_t now = GetTickCount64();
+    int animate = ui_motion_allowed();
+    for (int slot = 0; slot < UI_MOTION_SLOT_COUNT; ++slot) {
+        int selected = slot == selectedSlot;
+        bellwin_ui_motion_start(
+            &g_app.partMotions[slot].pressed,
+            selected ? 1.0f : 0.0f,
+            now,
+            ui_slot_duration(slot, selected),
+            animate
+        );
+    }
+    ui_motion_changed();
+}
+
+void ui_begin_pointer_press(HitInfo hit) {
+    UiPointerState state = ui_pointer_state_from_hit(hit);
+    ui_set_pressed_pointer(state);
+    if (state.part == UI_PART_TOGGLE) {
+        bellwin_ui_switch_motion_press(
+            &g_app.toggleMotion,
+            GetTickCount64(),
+            ui_motion_allowed()
+        );
+        ui_motion_changed();
+    }
+}
+
+void ui_end_pointer_press(void) {
+    ui_set_pressed_pointer((UiPointerState){CONTROL_NONE, UI_PART_NONE});
+}
+
+void ui_cancel_toggle_visual(void) {
+    if (!g_app.uiMotionInitialized) return;
+    int hovered = g_app.hoveredPointer.control == CONTROL_AUTOSTART
+        && g_app.hoveredPointer.part == UI_PART_TOGGLE;
+    bellwin_ui_switch_motion_cancel(
+        &g_app.toggleMotion,
+        hovered,
+        GetTickCount64(),
+        ui_motion_allowed()
+    );
+    ui_motion_changed();
+}
+
+void ui_set_toggle_checked_visual(int checked) {
+    if (!g_app.uiMotionInitialized) return;
+    uint64_t now = GetTickCount64();
+    int animate = ui_motion_allowed();
+    int hovered = g_app.hoveredPointer.control == CONTROL_AUTOSTART
+        && g_app.hoveredPointer.part == UI_PART_TOGGLE;
+    if (g_app.toggleMotion.pressed) {
+        bellwin_ui_switch_motion_release(
+            &g_app.toggleMotion,
+            checked,
+            hovered,
+            now,
+            animate
+        );
+    } else {
+        bellwin_ui_switch_motion_set_checked(
+            &g_app.toggleMotion,
+            checked,
+            now,
+            animate
+        );
+    }
+    bellwin_ui_motion_start(
+        &g_app.toggleStateMotion,
+        checked ? 1.0f : 0.0f,
+        now,
+        BELLWIN_UI_MOTION_FASTER_MS,
+        animate
+    );
+    ui_motion_changed();
+}
+
+void ui_animation_tick(void) {
+    if (!g_app.uiMotionInitialized) return;
+    uint64_t now = GetTickCount64();
+    for (int i = 0; i < UI_MOTION_SLOT_COUNT; ++i) {
+        bellwin_ui_motion_tick(&g_app.partMotions[i].hover, now);
+        bellwin_ui_motion_tick(&g_app.partMotions[i].pressed, now);
+    }
+    bellwin_ui_motion_tick(&g_app.toggleStateMotion, now);
+    bellwin_ui_switch_motion_tick(&g_app.toggleMotion, now);
+    ui_motion_changed();
+}
+
+static void ui_reset_motion_values(void) {
+    for (int i = 0; i < UI_MOTION_SLOT_COUNT; ++i) {
+        bellwin_ui_motion_init(&g_app.partMotions[i].hover, 0.0f);
+        bellwin_ui_motion_init(&g_app.partMotions[i].pressed, 0.0f);
+    }
+    g_app.hoveredPointer = (UiPointerState){CONTROL_NONE, UI_PART_NONE};
+    g_app.pressedPointer = (UiPointerState){CONTROL_NONE, UI_PART_NONE};
+    bellwin_ui_motion_init(&g_app.toggleStateMotion, g_app.autoStart ? 1.0f : 0.0f);
+    bellwin_ui_switch_motion_init(&g_app.toggleMotion, g_app.autoStart, 0);
+    g_app.togglePointer = (BellwinTogglePointerInteraction){0};
+}
+
+void ui_initialize_motion(void) {
+    ui_reset_motion_values();
+    g_app.uiAnimationsEnabled = ui_animation_policy_enabled();
+    g_app.uiMotionInitialized = 1;
+}
+
+void ui_reset_motion_for_hidden_window(void) {
+    if (!g_app.uiMotionInitialized) return;
+    ui_finish_all_motion();
+    ui_reset_motion_values();
+    g_app.hoverInstall = 0;
+}
+
+void ui_refresh_animation_policy(void) {
+    int enabled = ui_animation_policy_enabled();
+    if (!g_app.uiMotionInitialized || enabled == g_app.uiAnimationsEnabled) return;
+    g_app.uiAnimationsEnabled = enabled;
+    if (!enabled) {
+        ui_finish_all_motion();
+        if (g_app.window) InvalidateRect(g_app.window, NULL, FALSE);
+    }
+}
+
 int consume_wheel_steps(
     WheelTargetKind kind,
     ControlId control,

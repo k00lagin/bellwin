@@ -14,6 +14,13 @@ typedef struct BellwinShapeCoverage {
     uint8_t border;
 } BellwinShapeCoverage;
 
+typedef struct BellwinSubpixelRect {
+    int left;
+    int top;
+    int right;
+    int bottom;
+} BellwinSubpixelRect;
+
 /*
  * Estimate pixel coverage on a 4x4 subpixel grid. Coordinates and radii are
  * physical pixels; the returned counts can be used as alpha weights out of
@@ -45,6 +52,58 @@ static BellwinShapeCoverage bellwin_circle_coverage(
             int64_t distanceSquared = (int64_t)x * x + (int64_t)y * y;
             if (distanceSquared <= innerRadiusSquared) ++coverage.fill;
             else if (distanceSquared <= outerRadiusSquared) ++coverage.border;
+        }
+    }
+    return coverage;
+}
+
+static uint8_t bellwin_line_coverage(
+    int pixelX,
+    int pixelY,
+    int startX,
+    int startY,
+    int endX,
+    int endY,
+    int strokeWidth
+) {
+    if (strokeWidth <= 0) return 0;
+
+    const int scale = BELLWIN_AA_SUBPIXEL_SCALE;
+    int startXSubpixels = startX * scale;
+    int startYSubpixels = startY * scale;
+    int deltaX = (endX - startX) * scale;
+    int deltaY = (endY - startY) * scale;
+    int radius = strokeWidth * scale / 2;
+    int64_t lengthSquared = (int64_t)deltaX * deltaX + (int64_t)deltaY * deltaY;
+    int64_t radiusSquared = (int64_t)radius * radius;
+    uint8_t coverage = 0;
+
+    for (int sampleY = 0; sampleY < BELLWIN_AA_SAMPLE_GRID; ++sampleY) {
+        int sampleYSubpixels = pixelY * scale + sampleY * 2 + 1;
+        for (int sampleX = 0; sampleX < BELLWIN_AA_SAMPLE_GRID; ++sampleX) {
+            int sampleXSubpixels = pixelX * scale + sampleX * 2 + 1;
+            int offsetX = sampleXSubpixels - startXSubpixels;
+            int offsetY = sampleYSubpixels - startYSubpixels;
+            int64_t projection = (int64_t)offsetX * deltaX
+                + (int64_t)offsetY * deltaY;
+            int inside = 0;
+
+            if (lengthSquared == 0 || projection <= 0) {
+                int64_t distanceSquared = (int64_t)offsetX * offsetX
+                    + (int64_t)offsetY * offsetY;
+                inside = distanceSquared <= radiusSquared;
+            } else if (projection >= lengthSquared) {
+                int endOffsetX = sampleXSubpixels - endX * scale;
+                int endOffsetY = sampleYSubpixels - endY * scale;
+                int64_t distanceSquared = (int64_t)endOffsetX * endOffsetX
+                    + (int64_t)endOffsetY * endOffsetY;
+                inside = distanceSquared <= radiusSquared;
+            } else {
+                int64_t cross = (int64_t)offsetX * deltaY
+                    - (int64_t)offsetY * deltaX;
+                inside = cross * cross <= radiusSquared * lengthSquared;
+            }
+            if (inside) ++coverage;
         }
     }
     return coverage;
@@ -131,7 +190,34 @@ static BellwinShapeCoverage bellwin_rounded_rect_coverage(
     return coverage;
 }
 
-static uint8_t bellwin_horizontal_capsule_coverage(
+static int bellwin_even_subpixel_extent(float physicalExtent) {
+    if (physicalExtent <= 0.0f) return 0;
+    int halfSubpixelUnits = (int)(
+        physicalExtent * BELLWIN_AA_SUBPIXEL_SCALE * 0.5f + 0.5f
+    );
+    return halfSubpixelUnits * 2;
+}
+
+static BellwinSubpixelRect bellwin_centered_capsule_subpixel_rect(
+    int trackLeft,
+    int trackTop,
+    int trackBottom,
+    int localLeftSubpixels,
+    int widthSubpixels,
+    int heightSubpixels
+) {
+    const int scale = BELLWIN_AA_SUBPIXEL_SCALE;
+    int centerY = (trackTop + trackBottom) * scale / 2;
+    BellwinSubpixelRect rect = {
+        trackLeft * scale + localLeftSubpixels,
+        centerY - heightSubpixels / 2,
+        trackLeft * scale + localLeftSubpixels + widthSubpixels,
+        centerY - heightSubpixels / 2 + heightSubpixels,
+    };
+    return rect;
+}
+
+static uint8_t bellwin_horizontal_capsule_subpixel_coverage(
     int pixelX,
     int pixelY,
     int left,
@@ -142,12 +228,12 @@ static uint8_t bellwin_horizontal_capsule_coverage(
     if (right <= left || bottom <= top) return 0;
 
     const int subpixelScale = BELLWIN_AA_SUBPIXEL_SCALE;
-    const int radius = (bottom - top) * subpixelScale / 2;
-    const int centerY = (top + bottom) * subpixelScale / 2;
-    int leftCenterX = left * subpixelScale + radius;
-    int rightCenterX = right * subpixelScale - radius;
+    const int radius = (bottom - top) / 2;
+    const int centerY = (top + bottom) / 2;
+    int leftCenterX = left + radius;
+    int rightCenterX = right - radius;
     if (leftCenterX > rightCenterX) {
-        leftCenterX = rightCenterX = (left + right) * subpixelScale / 2;
+        leftCenterX = rightCenterX = (left + right) / 2;
     }
     const int64_t radiusSquared = (int64_t)radius * radius;
     uint8_t coverage = 0;
@@ -165,6 +251,25 @@ static uint8_t bellwin_horizontal_capsule_coverage(
         }
     }
     return coverage;
+}
+
+static inline uint8_t bellwin_horizontal_capsule_coverage(
+    int pixelX,
+    int pixelY,
+    int left,
+    int top,
+    int right,
+    int bottom
+) {
+    const int scale = BELLWIN_AA_SUBPIXEL_SCALE;
+    return bellwin_horizontal_capsule_subpixel_coverage(
+        pixelX,
+        pixelY,
+        left * scale,
+        top * scale,
+        right * scale,
+        bottom * scale
+    );
 }
 
 #endif

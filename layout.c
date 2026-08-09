@@ -30,8 +30,16 @@ Clay_ElementId bellwin_ui_hit_id(ControlId control) {
     case CONTROL_MAXIMUM_INTERVAL: return Clay_GetElementId(CLAY_STRING("MaximumRow"));
     case CONTROL_QUIET_START: return Clay_GetElementId(CLAY_STRING("QuietStartBox"));
     case CONTROL_QUIET_END: return Clay_GetElementId(CLAY_STRING("QuietEndBox"));
-    case CONTROL_AUTOSTART: return Clay_GetElementId(CLAY_STRING("AutostartToggle"));
+    case CONTROL_AUTOSTART: return Clay_GetElementId(CLAY_STRING("AutostartTarget"));
     case CONTROL_INSTALL: return Clay_GetElementId(CLAY_STRING("InstallButton"));
+    default: return Clay_GetElementId(CLAY_STRING("Root"));
+    }
+}
+
+/* The fixed visual region within a larger interactive control. */
+Clay_ElementId bellwin_ui_visual_id(ControlId control) {
+    switch (control) {
+    case CONTROL_AUTOSTART: return Clay_GetElementId(CLAY_STRING("AutostartVisual"));
     default: return Clay_GetElementId(CLAY_STRING("Root"));
     }
 }
@@ -285,20 +293,27 @@ Clay_RenderCommandArray bellwin_ui_build(const BellwinUiFrame *frame) {
             .padding = {bellwin_ui_pad(40.0f, s), bellwin_ui_pad(50.0f, s), 0, 0},
             .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
         }}) {
-            CLAY({.layout = {
-                .sizing = {CLAY_SIZING_FIXED(145.0f * s), CLAY_SIZING_GROW(0)},
-                .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-            }}) {
-                CLAY_TEXT(
-                    CLAY_STRING("Launch at login"),
-                    bellwin_ui_text_config(BELLWIN_FONT_BODY, 18.0f, s, colors->primaryText)
-                );
-            }
-            bellwin_ui_spacer_width(5.0f * s);
             CLAY({.id = bellwin_ui_hit_id(CONTROL_AUTOSTART),
-                .layout = {.sizing = {CLAY_SIZING_FIXED(54.0f * s), CLAY_SIZING_FIXED(30.0f * s)}},
-                .custom = {.customData = (void *)bellwin_ui_custom_for(CONTROL_AUTOSTART)},
-            }) {}
+                .layout = {
+                    .sizing = {CLAY_SIZING_FIXED(197.0f * s), CLAY_SIZING_FIXED(40.0f * s)},
+                    .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                },
+            }) {
+                CLAY({.layout = {
+                    .sizing = {CLAY_SIZING_FIXED(145.0f * s), CLAY_SIZING_GROW(0)},
+                    .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                }}) {
+                    CLAY_TEXT(
+                        CLAY_STRING("Launch at login"),
+                        bellwin_ui_text_config(BELLWIN_FONT_BODY, 18.0f, s, colors->primaryText)
+                    );
+                }
+                bellwin_ui_spacer_width(12.0f * s);
+                CLAY({.id = bellwin_ui_visual_id(CONTROL_AUTOSTART),
+                    .layout = {.sizing = {CLAY_SIZING_FIXED(40.0f * s), CLAY_SIZING_FIXED(20.0f * s)}},
+                    .custom = {.customData = (void *)bellwin_ui_custom_for(CONTROL_AUTOSTART)},
+                }) {}
+            }
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(0)}}}) {}
             if (frame->showInstall) {
                 CLAY({.id = bellwin_ui_hit_id(CONTROL_INSTALL),

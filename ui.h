@@ -19,8 +19,19 @@ typedef struct HitInfo {
     int stepperUp;
 } HitInfo;
 
+enum { BELLWIN_UI_ANIMATION_TIMER_ID = 4 };
+
 void update_pointer_state(float x, float y, int down);
 HitInfo hit_test_pointer(float x, float y);
+void ui_update_hover_from_hit(HitInfo hit);
+void ui_begin_pointer_press(HitInfo hit);
+void ui_end_pointer_press(void);
+void ui_cancel_toggle_visual(void);
+void ui_set_toggle_checked_visual(int checked);
+void ui_animation_tick(void);
+void ui_initialize_motion(void);
+void ui_reset_motion_for_hidden_window(void);
+void ui_refresh_animation_policy(void);
 int consume_wheel_steps(WheelTargetKind kind, ControlId control, BellwinTimeSegment segment, int delta);
 void set_focus_visibility(FocusVisibility visibility);
 void focus_control_part(ControlId control, FocusVisibility visibility, int chooseTimeSegment, BellwinTimeSegment segment);

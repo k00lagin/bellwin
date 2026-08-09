@@ -45,6 +45,46 @@ typedef struct BellwinWidgetAction {
     int amount;
 } BellwinWidgetAction;
 
+typedef enum BellwinTogglePointerResult {
+    BELLWIN_TOGGLE_POINTER_NONE,
+    BELLWIN_TOGGLE_POINTER_COMMIT,
+    BELLWIN_TOGGLE_POINTER_CANCEL,
+} BellwinTogglePointerResult;
+
+typedef struct BellwinTogglePointerInteraction {
+    int pending;
+    int desired;
+} BellwinTogglePointerInteraction;
+
+static inline void bellwin_toggle_pointer_begin(
+    BellwinTogglePointerInteraction *interaction,
+    int checked
+) {
+    interaction->pending = 1;
+    interaction->desired = checked ? 0 : 1;
+}
+
+static inline BellwinTogglePointerResult bellwin_toggle_pointer_release(
+    BellwinTogglePointerInteraction *interaction,
+    int releasedInside,
+    int *desired
+) {
+    if (!interaction->pending) return BELLWIN_TOGGLE_POINTER_NONE;
+    if (desired) *desired = interaction->desired;
+    interaction->pending = 0;
+    return releasedInside
+        ? BELLWIN_TOGGLE_POINTER_COMMIT
+        : BELLWIN_TOGGLE_POINTER_CANCEL;
+}
+
+static inline BellwinTogglePointerResult bellwin_toggle_pointer_cancel(
+    BellwinTogglePointerInteraction *interaction
+) {
+    if (!interaction->pending) return BELLWIN_TOGGLE_POINTER_NONE;
+    interaction->pending = 0;
+    return BELLWIN_TOGGLE_POINTER_CANCEL;
+}
+
 static inline BellwinWidgetAction bellwin_widget_key_action(BellwinWidgetRole role, BellwinWidgetKey key) {
     BellwinWidgetAction action = {BELLWIN_WIDGET_ACTION_NONE, 0};
     switch (role) {

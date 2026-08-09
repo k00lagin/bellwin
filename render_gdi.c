@@ -16,6 +16,25 @@ static void fill_rect_color(HDC dc, const RECT *rect, COLORREF color) {
     DeleteObject(brush);
 }
 
+static COLORREF interpolate_color(COLORREF from, COLORREF to, float progress) {
+    progress = bellwin_ui_clamp01(progress);
+    int red = (int)(GetRValue(from)
+        + (GetRValue(to) - GetRValue(from)) * progress + 0.5f);
+    int green = (int)(GetGValue(from)
+        + (GetGValue(to) - GetGValue(from)) * progress + 0.5f);
+    int blue = (int)(GetBValue(from)
+        + (GetBValue(to) - GetBValue(from)) * progress + 0.5f);
+    return RGB(red, green, blue);
+}
+
+static float ui_motion_value(ControlId control, UiVisualPart part, int pressed) {
+    int slot = ui_motion_slot_for(control, part);
+    if (slot < 0 || slot >= UI_MOTION_SLOT_COUNT) return 0.0f;
+    return pressed
+        ? g_app.partMotions[slot].pressed.value
+        : g_app.partMotions[slot].hover.value;
+}
+
 /* radius is in physical pixels */
 static void rounded_rect(HDC dc, const RECT *rect, int radius, COLORREF fill, COLORREF border) {
     HBRUSH brush = CreateSolidBrush(fill);
@@ -128,10 +147,13 @@ static void draw_antialiased_circle(
     }
 }
 
-static void draw_antialiased_horizontal_capsule(
+static void draw_antialiased_rounded_rect(
     PixelSurface *surface,
     const RECT *rect,
-    COLORREF color
+    int radius,
+    int borderWidth,
+    COLORREF fill,
+    COLORREF border
 ) {
     if (!surface->pixels || rect->right <= rect->left || rect->bottom <= rect->top) return;
 
@@ -139,17 +161,111 @@ static void draw_antialiased_horizontal_capsule(
     int top = rect->top < 0 ? 0 : rect->top;
     int right = rect->right > surface->width ? surface->width : rect->right;
     int bottom = rect->bottom > surface->height ? surface->height : rect->bottom;
+    GdiFlush();
+    for (int y = top; y < bottom; ++y) {
+        for (int x = left; x < right; ++x) {
+            BellwinShapeCoverage coverage = bellwin_rounded_rect_coverage(
+                x,
+                y,
+                rect->left,
+                rect->top,
+                rect->right,
+                rect->bottom,
+                radius,
+                borderWidth
+            );
+            if (coverage.fill == 0 && coverage.border == 0) continue;
+            blend_coverage_pixel(
+                surface,
+                x,
+                y,
+                fill,
+                border,
+                coverage.fill,
+                coverage.border
+            );
+        }
+    }
+}
+
+static void draw_clipped_antialiased_rounded_fill(
+    PixelSurface *surface,
+    const RECT *outer,
+    const RECT *clip,
+    int radius,
+    COLORREF color
+) {
+    if (!surface->pixels || clip->right <= clip->left || clip->bottom <= clip->top) return;
+
+    int left = clip->left < 0 ? 0 : clip->left;
+    int top = clip->top < 0 ? 0 : clip->top;
+    int right = clip->right > surface->width ? surface->width : clip->right;
+    int bottom = clip->bottom > surface->height ? surface->height : clip->bottom;
+    GdiFlush();
+    for (int y = top; y < bottom; ++y) {
+        for (int x = left; x < right; ++x) {
+            BellwinShapeCoverage coverage = bellwin_rounded_rect_coverage(
+                x,
+                y,
+                outer->left,
+                outer->top,
+                outer->right,
+                outer->bottom,
+                radius,
+                0
+            );
+            if (coverage.fill == 0) continue;
+            blend_coverage_pixel(surface, x, y, color, color, coverage.fill, 0);
+        }
+    }
+}
+
+static void draw_antialiased_horizontal_capsule_subpixels(
+    PixelSurface *surface,
+    const BellwinSubpixelRect *rect,
+    COLORREF color
+) {
+    if (!surface->pixels || rect->right <= rect->left || rect->bottom <= rect->top) return;
+
+    const int scale = BELLWIN_AA_SUBPIXEL_SCALE;
+    int clippedLeft = rect->left < 0 ? 0 : rect->left;
+    int clippedTop = rect->top < 0 ? 0 : rect->top;
+    int clippedRight = rect->right > surface->width * scale
+        ? surface->width * scale
+        : rect->right;
+    int clippedBottom = rect->bottom > surface->height * scale
+        ? surface->height * scale
+        : rect->bottom;
+    int left = clippedLeft / scale;
+    int top = clippedTop / scale;
+    int right = (clippedRight + scale - 1) / scale;
+    int bottom = (clippedBottom + scale - 1) / scale;
 
     GdiFlush();
     for (int y = top; y < bottom; ++y) {
         for (int x = left; x < right; ++x) {
-            unsigned coverage = bellwin_horizontal_capsule_coverage(
+            unsigned coverage = bellwin_horizontal_capsule_subpixel_coverage(
                 x, y, rect->left, rect->top, rect->right, rect->bottom
             );
             if (coverage == 0) continue;
             blend_coverage_pixel(surface, x, y, color, color, coverage, 0);
         }
     }
+}
+
+static void draw_antialiased_horizontal_capsule(
+    PixelSurface *surface,
+    const RECT *rect,
+    COLORREF color
+) {
+    const int scale = BELLWIN_AA_SUBPIXEL_SCALE;
+    BellwinSubpixelRect subpixelRect = {
+        rect->left * scale,
+        rect->top * scale,
+        rect->right * scale,
+        rect->bottom * scale,
+    };
+    draw_antialiased_horizontal_capsule_subpixels(surface, &subpixelRect, color);
 }
 
 static void draw_antialiased_rounded_outline(
@@ -189,87 +305,196 @@ static void render_slider_custom(PixelSurface *surface, HDC dc, Clay_BoundingBox
     const Widget *widget = widget_by_id(control);
     if (!widget || widget->maximum <= widget->minimum) return;
 
+    const BellwinThemePalette *palette = &g_app.theme.palette;
     float fraction = (float)(*widget->value - widget->minimum)
         / (float)(widget->maximum - widget->minimum);
     int left = (int)(box.x + 0.5f);
     int right = (int)(box.x + box.width + 0.5f);
     int centerY = (int)(box.y + box.height / 2.0f + 0.5f);
     int position = left + (int)(fraction * box.width + 0.5f);
+    int railHeight = px(4);
+    if (railHeight < 2) railHeight = 2;
+    int railTop = centerY - railHeight / 2;
+    int railBottom = railTop + railHeight;
 
-    RECT inactive = {left, centerY - px(2), right, centerY + px(2)};
-    RECT active = {left, centerY - px(2), position, centerY + px(2)};
-    fill_rect_color(dc, &inactive, g_app.theme.palette.inactiveTrack);
-    fill_rect_color(dc, &active, g_app.theme.palette.accent);
+    float hover = ui_motion_value(control, UI_PART_SLIDER, 0);
+    float pressed = ui_motion_value(control, UI_PART_SLIDER, 1);
+    COLORREF activeColor = interpolate_color(
+        palette->sliderTrackActive,
+        palette->sliderTrackActiveHover,
+        hover
+    );
+    activeColor = interpolate_color(
+        activeColor,
+        palette->sliderTrackActivePressed,
+        pressed
+    );
 
+    /* Outside ticks are drawn first so they remain physically separate from
+       the rail. Their pen is one physical device pixel at every DPI. */
     if (widget->ticks > 1) {
-        HPEN tickPen = CreatePen(PS_SOLID, px(2), g_app.theme.palette.tick);
+        HPEN tickPen = CreatePen(PS_SOLID, 1, palette->sliderTick);
         HGDIOBJ oldPen = SelectObject(dc, tickPen);
+        int gap = px(4);
+        int length = px(4);
         for (int i = 0; i < widget->ticks; ++i) {
             int x = left + MulDiv(i, right - left, widget->ticks - 1);
-            MoveToEx(dc, x, centerY - px(7), NULL);
-            LineTo(dc, x, centerY + px(7));
+            MoveToEx(dc, x, railTop - gap - length, NULL);
+            LineTo(dc, x, railTop - gap);
+            MoveToEx(dc, x, railBottom + gap, NULL);
+            LineTo(dc, x, railBottom + gap + length);
         }
         SelectObject(dc, oldPen);
         DeleteObject(tickPen);
     }
 
+    RECT inactive = {left, railTop, right, railBottom};
+    draw_antialiased_horizontal_capsule(surface, &inactive, palette->sliderTrackInactive);
+    if (position > left) {
+        RECT active = {left, railTop, position, railBottom};
+        draw_antialiased_horizontal_capsule(surface, &active, activeColor);
+    }
+
+    int outerRadius = px(11);
+    int outerBorder = px(1);
+    if (outerBorder < 1) outerBorder = 1;
     draw_antialiased_circle(
         surface,
         position,
         centerY,
-        px(10),
-        px(3),
-        g_app.theme.palette.knob,
-        g_app.theme.palette.accent
+        outerRadius,
+        outerBorder,
+        palette->sliderThumbSurface,
+        palette->sliderThumbBorder
+    );
+
+    float innerDiameter = bellwin_ui_lerp(12.0f, 14.0f, hover);
+    innerDiameter = bellwin_ui_lerp(innerDiameter, 10.0f, pressed);
+    int innerRadius = (int)(innerDiameter * ui_scale() * 0.5f + 0.5f);
+    if (innerRadius < 1) innerRadius = 1;
+    COLORREF innerColor = interpolate_color(
+        palette->sliderThumbInner,
+        palette->sliderThumbInnerHover,
+        hover
+    );
+    innerColor = interpolate_color(
+        innerColor,
+        palette->sliderThumbInnerPressed,
+        pressed
+    );
+    draw_antialiased_circle(
+        surface,
+        position,
+        centerY,
+        innerRadius,
+        0,
+        innerColor,
+        innerColor
     );
 }
 
-static void draw_triangle(HDC dc, POINT points[3], COLORREF color) {
-    HBRUSH brush = CreateSolidBrush(color);
-    HPEN pen = CreatePen(PS_SOLID, 1, color);
-    HGDIOBJ oldBrush = SelectObject(dc, brush);
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    Polygon(dc, points, 3);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(brush);
-    DeleteObject(pen);
+static void draw_chevron(PixelSurface *surface, const POINT points[3], COLORREF color) {
+    if (!surface->pixels) return;
+    int width = px(1);
+    if (width < 1) width = 1;
+    int left = points[0].x;
+    int right = points[0].x;
+    int top = points[0].y;
+    int bottom = points[0].y;
+    for (int i = 1; i < 3; ++i) {
+        if (points[i].x < left) left = points[i].x;
+        if (points[i].x > right) right = points[i].x;
+        if (points[i].y < top) top = points[i].y;
+        if (points[i].y > bottom) bottom = points[i].y;
+    }
+    left -= width;
+    top -= width;
+    right += width + 1;
+    bottom += width + 1;
+    if (left < 0) left = 0;
+    if (top < 0) top = 0;
+    if (right > surface->width) right = surface->width;
+    if (bottom > surface->height) bottom = surface->height;
+
+    GdiFlush();
+    for (int y = top; y < bottom; ++y) {
+        for (int x = left; x < right; ++x) {
+            unsigned first = bellwin_line_coverage(
+                x, y, points[0].x, points[0].y, points[1].x, points[1].y, width
+            );
+            unsigned second = bellwin_line_coverage(
+                x, y, points[1].x, points[1].y, points[2].x, points[2].y, width
+            );
+            unsigned coverage = first > second ? first : second;
+            if (coverage == 0) continue;
+            blend_coverage_pixel(surface, x, y, color, color, coverage, 0);
+        }
+    }
 }
 
-static void render_time_box_custom(HDC dc, Clay_BoundingBox box, ControlId control) {
+static void render_time_box_custom(
+    PixelSurface *surface,
+    HDC dc,
+    Clay_BoundingBox box,
+    ControlId control
+) {
     const Widget *widget = widget_by_id(control);
     if (!widget) return;
+    const BellwinThemePalette *palette = &g_app.theme.palette;
     int minuteOfDay = *widget->value;
     int focused = control_has_focus(control);
     float scale = ui_scale();
     BellwinTimeBoxMetrics metrics = bellwin_time_box_metrics(box, scale);
 
     RECT boxRect = rect_from_box(box);
-    rounded_rect(dc, &boxRect, px(3), g_app.theme.palette.controlBackground, g_app.theme.palette.controlBorder);
+    rounded_rect(dc, &boxRect, px(3), palette->controlBackground, palette->controlBorder);
+
+    UiVisualPart stepperParts[2] = {UI_PART_TIME_UP, UI_PART_TIME_DOWN};
+    Clay_BoundingBox stepperBoxes[2] = {metrics.stepperUp, metrics.stepperDown};
+    for (int i = 0; i < 2; ++i) {
+        float hover = ui_motion_value(control, stepperParts[i], 0);
+        float pressed = ui_motion_value(control, stepperParts[i], 1);
+        if (hover <= 0.0f && pressed <= 0.0f) continue;
+        COLORREF fill = interpolate_color(
+            palette->controlBackground,
+            palette->stepperHoverFill,
+            hover
+        );
+        fill = interpolate_color(fill, palette->stepperPressedFill, pressed);
+        RECT clip = rect_from_box(stepperBoxes[i]);
+        draw_clipped_antialiased_rounded_fill(surface, &boxRect, &clip, px(3), fill);
+    }
+    draw_antialiased_rounded_outline(
+        surface,
+        &boxRect,
+        px(3),
+        1,
+        palette->controlBorder
+    );
 
     RECT hoursRect = rect_from_box(metrics.hours);
     RECT colonRect = rect_from_box(metrics.colon);
     RECT minutesRect = rect_from_box(metrics.minutes);
     RECT *selectedRect = g_app.timeEdit.segment == BELLWIN_TIME_HOURS ? &hoursRect : &minutesRect;
-    if (focused) rounded_rect(dc, selectedRect, px(3), g_app.theme.palette.accent, g_app.theme.palette.accent);
+    if (focused) rounded_rect(dc, selectedRect, px(3), palette->accent, palette->accent);
 
     wchar_t hoursText[3];
     wchar_t minutesText[3];
     swprintf_s(hoursText, 3, L"%02d", minuteOfDay / 60);
     swprintf_s(minutesText, 3, L"%02d", minuteOfDay % 60);
     COLORREF hoursColor = focused && g_app.timeEdit.segment == BELLWIN_TIME_HOURS
-        ? g_app.theme.palette.accentText
-        : g_app.theme.palette.controlText;
+        ? palette->accentText
+        : palette->controlText;
     COLORREF minutesColor = focused && g_app.timeEdit.segment == BELLWIN_TIME_MINUTES
-        ? g_app.theme.palette.accentText
-        : g_app.theme.palette.controlText;
+        ? palette->accentText
+        : palette->controlText;
     draw_text(dc, hoursText, hoursRect, g_app.bodyFont, hoursColor, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    draw_text(dc, L":", colonRect, g_app.bodyFont, g_app.theme.palette.controlText, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    draw_text(dc, L":", colonRect, g_app.bodyFont, palette->controlText, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     draw_text(dc, minutesText, minutesRect, g_app.bodyFont, minutesColor, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     int dividerX = (int)(metrics.dividerX + 0.5f);
     int stepperMidY = (int)(metrics.stepperMidY + 0.5f);
-    HPEN divider = CreatePen(PS_SOLID, 1, g_app.theme.palette.divider);
+    HPEN divider = CreatePen(PS_SOLID, 1, palette->divider);
     HGDIOBJ oldPen = SelectObject(dc, divider);
     MoveToEx(dc, dividerX, boxRect.top, NULL);
     LineTo(dc, dividerX, boxRect.bottom);
@@ -281,38 +506,104 @@ static void render_time_box_custom(HDC dc, Clay_BoundingBox box, ControlId contr
     int triangleLeft = (int)(box.x + 91.0f * scale + 0.5f);
     int triangleMid = (int)(box.x + 97.0f * scale + 0.5f);
     int triangleRight = (int)(box.x + 103.0f * scale + 0.5f);
-    POINT up[3] = {
+    const POINT up[3] = {
         {triangleLeft, (int)(box.y + 14.0f * scale + 0.5f)},
         {triangleMid, (int)(box.y + 8.0f * scale + 0.5f)},
         {triangleRight, (int)(box.y + 14.0f * scale + 0.5f)},
     };
-    POINT down[3] = {
+    const POINT down[3] = {
         {triangleLeft, (int)(box.y + 26.0f * scale + 0.5f)},
         {triangleMid, (int)(box.y + 32.0f * scale + 0.5f)},
         {triangleRight, (int)(box.y + 26.0f * scale + 0.5f)},
     };
-    draw_triangle(dc, up, g_app.theme.palette.controlText);
-    draw_triangle(dc, down, g_app.theme.palette.controlText);
+    float upHover = ui_motion_value(control, UI_PART_TIME_UP, 0);
+    float downHover = ui_motion_value(control, UI_PART_TIME_DOWN, 0);
+    float upPressed = ui_motion_value(control, UI_PART_TIME_UP, 1);
+    float downPressed = ui_motion_value(control, UI_PART_TIME_DOWN, 1);
+    COLORREF upColor = interpolate_color(
+        palette->controlGlyphSecondary,
+        palette->controlGlyphHover,
+        upHover
+    );
+    upColor = interpolate_color(upColor, palette->controlGlyphPressed, upPressed);
+    COLORREF downColor = interpolate_color(
+        palette->controlGlyphSecondary,
+        palette->controlGlyphHover,
+        downHover
+    );
+    downColor = interpolate_color(downColor, palette->controlGlyphPressed, downPressed);
+    draw_chevron(
+        surface,
+        up,
+        upColor
+    );
+    draw_chevron(
+        surface,
+        down,
+        downColor
+    );
 }
 
 static void render_toggle_custom(PixelSurface *surface, Clay_BoundingBox box) {
-    int on = g_app.autoStart;
+    const BellwinThemePalette *palette = &g_app.theme.palette;
     float scale = ui_scale();
     RECT track = rect_from_box(box);
-    draw_antialiased_horizontal_capsule(
-        surface, &track, on ? g_app.theme.palette.accent : g_app.theme.palette.toggleOff
+    float hover = ui_motion_value(CONTROL_AUTOSTART, UI_PART_TOGGLE, 0);
+    float pressed = ui_motion_value(CONTROL_AUTOSTART, UI_PART_TOGGLE, 1);
+    float checked = g_app.toggleStateMotion.value;
+
+    COLORREF offFill = interpolate_color(
+        palette->toggleTrackOffFill,
+        palette->toggleTrackOffFillHover,
+        hover
     );
-    int knobX = (int)(box.x + (on ? 39.0f : 15.0f) * scale + 0.5f);
-    int knobY = (int)(box.y + box.height / 2.0f + 0.5f);
-    draw_antialiased_circle(
+    offFill = interpolate_color(offFill, palette->toggleTrackOffFillPressed, pressed);
+    COLORREF onFill = interpolate_color(
+        palette->toggleTrackOnFill,
+        palette->toggleTrackOnFillHover,
+        hover
+    );
+    onFill = interpolate_color(onFill, palette->toggleTrackOnFillPressed, pressed);
+    COLORREF trackFill = interpolate_color(offFill, onFill, checked);
+    COLORREF trackBorder = interpolate_color(
+        palette->toggleTrackOffStroke,
+        onFill,
+        checked
+    );
+    int borderWidth = px(1);
+    if (borderWidth < 1) borderWidth = 1;
+    draw_antialiased_rounded_rect(
         surface,
-        knobX,
-        knobY,
-        px(11),
-        0,
-        on ? g_app.theme.palette.knob : g_app.theme.palette.toggleOffKnob,
-        on ? g_app.theme.palette.knob : g_app.theme.palette.toggleOffKnob
+        &track,
+        (track.bottom - track.top) / 2,
+        borderWidth,
+        trackFill,
+        trackBorder
     );
+
+    BellwinUiRect knobGeometry = bellwin_ui_switch_motion_rect(&g_app.toggleMotion);
+    const int subpixelScale = BELLWIN_AA_SUBPIXEL_SCALE;
+    int localLeftSubpixels = (int)(knobGeometry.x * scale * subpixelScale + 0.5f);
+    int knobWidthSubpixels = (int)(
+        knobGeometry.width * scale * subpixelScale + 0.5f
+    );
+    int knobHeightSubpixels = bellwin_even_subpixel_extent(
+        knobGeometry.height * scale
+    );
+    BellwinSubpixelRect knob = bellwin_centered_capsule_subpixel_rect(
+        track.left,
+        track.top,
+        track.bottom,
+        localLeftSubpixels,
+        knobWidthSubpixels,
+        knobHeightSubpixels
+    );
+    COLORREF knobColor = interpolate_color(
+        palette->toggleThumbOff,
+        palette->toggleThumbOn,
+        checked
+    );
+    draw_antialiased_horizontal_capsule_subpixels(surface, &knob, knobColor);
 }
 
 static HFONT font_for_id(uint16_t fontId) {
@@ -432,7 +723,7 @@ static void render_ui_custom(PixelSurface *surface, HDC dc, const Clay_RenderCom
         render_slider_custom(surface, dc, command->boundingBox, custom->control);
         break;
     case BELLWIN_UI_CUSTOM_TIME_BOX:
-        render_time_box_custom(dc, command->boundingBox, custom->control);
+        render_time_box_custom(surface, dc, command->boundingBox, custom->control);
         break;
     case BELLWIN_UI_CUSTOM_TOGGLE:
         render_toggle_custom(surface, command->boundingBox);
@@ -479,8 +770,8 @@ static void render_focus_ring(PixelSurface *surface) {
     if (widget->role == BELLWIN_WIDGET_SLIDER) {
         radius = px(6);
     } else if (widget->role == BELLWIN_WIDGET_TOGGLE) {
-        InflateRect(&rect, px(5), px(5));
-        radius = px(20);
+        InflateRect(&rect, px(4), px(3));
+        radius = px(5);
     } else if (widget->role == BELLWIN_WIDGET_BUTTON) {
         radius = px(5);
     } else {

@@ -191,6 +191,46 @@ static void test_antialiased_capsule_coverage(void) {
     assert(partial == bellwin_horizontal_capsule_coverage(50, 5, 0, 0, 54, 30));
 }
 
+static void test_switch_capsule_stays_physically_centered_at_supported_dpi(void) {
+    const int dpis[] = {96, 120, 144, 192};
+    const float logicalHeights[] = {12.0f, 12.5f, 13.0f, 13.5f, 14.0f};
+    for (int dpiIndex = 0; dpiIndex < 4; ++dpiIndex) {
+        int dpi = dpis[dpiIndex];
+        int trackHeight = (20 * dpi + 48) / 96;
+        for (int heightIndex = 0; heightIndex < 5; ++heightIndex) {
+            float physicalHeight = logicalHeights[heightIndex] * (float)dpi / 96.0f;
+            int heightSubpixels = bellwin_even_subpixel_extent(physicalHeight);
+            float exactSubpixels = physicalHeight * BELLWIN_AA_SUBPIXEL_SCALE;
+            float extentError = heightSubpixels - exactSubpixels;
+            if (extentError < 0.0f) extentError = -extentError;
+            assert(extentError <= 1.0f);
+            BellwinSubpixelRect rect = bellwin_centered_capsule_subpixel_rect(
+                11,
+                17,
+                17 + trackHeight,
+                3 * dpi * BELLWIN_AA_SUBPIXEL_SCALE / 96,
+                17 * dpi * BELLWIN_AA_SUBPIXEL_SCALE / 96,
+                heightSubpixels
+            );
+            assert(rect.bottom - rect.top == heightSubpixels);
+            assert(
+                rect.top + rect.bottom
+                == (17 + 17 + trackHeight) * BELLWIN_AA_SUBPIXEL_SCALE
+            );
+        }
+    }
+}
+
+static void test_antialiased_line_coverage(void) {
+    uint8_t center = bellwin_line_coverage(5, 5, 0, 0, 10, 10, 1);
+    uint8_t adjacent = bellwin_line_coverage(4, 5, 0, 0, 10, 10, 1);
+    assert(center > 0);
+    assert(adjacent > 0);
+    assert(adjacent < BELLWIN_AA_SAMPLE_COUNT);
+    assert(adjacent == bellwin_line_coverage(5, 4, 0, 0, 10, 10, 1));
+    assert(bellwin_line_coverage(0, 9, 0, 0, 10, 10, 1) == 0);
+}
+
 static void test_antialiased_rounded_rect_coverage(void) {
     BellwinShapeCoverage center = bellwin_rounded_rect_coverage(
         9, 9, 0, 0, 20, 20, 5, 2
@@ -241,6 +281,8 @@ int main(void) {
     test_last_ring_relative_time_formatting();
     test_antialiased_circle_coverage();
     test_antialiased_capsule_coverage();
+    test_switch_capsule_stays_physically_centered_at_supported_dpi();
+    test_antialiased_line_coverage();
     test_antialiased_rounded_rect_coverage();
     puts("core tests passed");
     return 0;
