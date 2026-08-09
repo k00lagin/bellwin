@@ -18,6 +18,40 @@ typedef enum BellwinTimeSegment {
     BELLWIN_TIME_MINUTES,
 } BellwinTimeSegment;
 
+typedef enum BellwinTrayEvent {
+    BELLWIN_TRAY_LEFT_BUTTON_UP,
+    BELLWIN_TRAY_LEFT_BUTTON_DOUBLE_CLICK,
+    BELLWIN_TRAY_SELECT,
+    BELLWIN_TRAY_KEY_SELECT,
+    BELLWIN_TRAY_CONTEXT_MENU,
+} BellwinTrayEvent;
+
+typedef enum BellwinTrayAction {
+    BELLWIN_TRAY_ACTION_NONE,
+    BELLWIN_TRAY_ACTION_DEFER_MENU,
+    BELLWIN_TRAY_ACTION_SHOW_MENU,
+    BELLWIN_TRAY_ACTION_SHOW_SETTINGS,
+    BELLWIN_TRAY_ACTION_CANCEL_MENU_AND_SHOW_SETTINGS,
+} BellwinTrayAction;
+
+static BellwinTrayAction bellwin_tray_action(BellwinTrayEvent event, int *suppressLeftButtonUp) {
+    if (event == BELLWIN_TRAY_LEFT_BUTTON_UP) {
+        if (*suppressLeftButtonUp) {
+            *suppressLeftButtonUp = 0;
+            return BELLWIN_TRAY_ACTION_NONE;
+        }
+        return BELLWIN_TRAY_ACTION_DEFER_MENU;
+    }
+    if (event == BELLWIN_TRAY_LEFT_BUTTON_DOUBLE_CLICK) {
+        *suppressLeftButtonUp = 1;
+        return BELLWIN_TRAY_ACTION_CANCEL_MENU_AND_SHOW_SETTINGS;
+    }
+    if (event == BELLWIN_TRAY_SELECT) return BELLWIN_TRAY_ACTION_NONE;
+    if (event == BELLWIN_TRAY_KEY_SELECT) return BELLWIN_TRAY_ACTION_SHOW_SETTINGS;
+    if (event == BELLWIN_TRAY_CONTEXT_MENU) return BELLWIN_TRAY_ACTION_SHOW_MENU;
+    return BELLWIN_TRAY_ACTION_NONE;
+}
+
 static BellwinTimeSegment bellwin_next_time_segment(BellwinTimeSegment segment) {
     return segment == BELLWIN_TIME_HOURS ? BELLWIN_TIME_MINUTES : BELLWIN_TIME_HOURS;
 }

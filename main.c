@@ -23,6 +23,7 @@
 #define APP_MUTEX L"Local\\Bellwin.SingleInstance"
 #define TIMER_SCHEDULE 1
 #define TIMER_VOLUME_PREVIEW 2
+#define TIMER_TRAY_SINGLE_CLICK 3
 #define WM_TRAY (WM_APP + 1)
 #define WM_SHOW_BELLWIN (WM_APP + 2)
 #define CMD_TRAY_SHOW 1001
@@ -147,6 +148,7 @@ typedef struct AppState {
     int updateAvailable;
     uint64_t installedVersion;
     int exiting;
+    int suppressTrayLeftButtonUp;
     uint64_t remainingActiveSeconds;
     uint64_t plannedActiveSeconds;
     ULONGLONG activeSegmentStartTick;
@@ -1810,6 +1812,11 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         return 0;
     }
     case WM_TIMER:
+        if (wParam == TIMER_TRAY_SINGLE_CLICK) {
+            KillTimer(window, TIMER_TRAY_SINGLE_CLICK);
+            show_tray_menu();
+            return 0;
+        }
         if (wParam == TIMER_VOLUME_PREVIEW) {
             KillTimer(window, TIMER_VOLUME_PREVIEW);
             play_bell();
@@ -1833,10 +1840,23 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
         return 0;
     case WM_TRAY: {
         UINT trayEvent = LOWORD(lParam);
-        if (trayEvent == WM_LBUTTONUP || trayEvent == WM_LBUTTONDBLCLK
-            || trayEvent == NIN_SELECT || trayEvent == NIN_KEYSELECT) {
+        BellwinTrayEvent event;
+        if (trayEvent == WM_LBUTTONUP) event = BELLWIN_TRAY_LEFT_BUTTON_UP;
+        else if (trayEvent == WM_LBUTTONDBLCLK) event = BELLWIN_TRAY_LEFT_BUTTON_DOUBLE_CLICK;
+        else if (trayEvent == NIN_SELECT) event = BELLWIN_TRAY_SELECT;
+        else if (trayEvent == NIN_KEYSELECT) event = BELLWIN_TRAY_KEY_SELECT;
+        else if (trayEvent == WM_RBUTTONUP || trayEvent == WM_CONTEXTMENU) event = BELLWIN_TRAY_CONTEXT_MENU;
+        else return 0;
+
+        BellwinTrayAction action = bellwin_tray_action(event, &g_app.suppressTrayLeftButtonUp);
+        if (action == BELLWIN_TRAY_ACTION_DEFER_MENU) {
+            SetTimer(window, TIMER_TRAY_SINGLE_CLICK, GetDoubleClickTime(), NULL);
+        } else if (action == BELLWIN_TRAY_ACTION_CANCEL_MENU_AND_SHOW_SETTINGS) {
+            KillTimer(window, TIMER_TRAY_SINGLE_CLICK);
             show_window();
-        } else if (trayEvent == WM_RBUTTONUP || trayEvent == WM_CONTEXTMENU) {
+        } else if (action == BELLWIN_TRAY_ACTION_SHOW_SETTINGS) {
+            show_window();
+        } else if (action == BELLWIN_TRAY_ACTION_SHOW_MENU) {
             show_tray_menu();
         }
         return 0;
@@ -1926,6 +1946,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LP
     case WM_DESTROY:
         KillTimer(window, TIMER_SCHEDULE);
         KillTimer(window, TIMER_VOLUME_PREVIEW);
+        KillTimer(window, TIMER_TRAY_SINGLE_CLICK);
         remove_tray_icon();
         mciSendStringW(L"close bellwin_sound", NULL, 0, NULL);
         delete_fonts();

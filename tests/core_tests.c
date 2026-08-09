@@ -81,6 +81,33 @@ static void test_time_segment_selection_cycles(void) {
     assert(bellwin_next_time_segment(BELLWIN_TIME_MINUTES) == BELLWIN_TIME_HOURS);
 }
 
+static void test_tray_click_actions(void) {
+    int suppressLeftButtonUp = 0;
+    assert(
+        bellwin_tray_action(BELLWIN_TRAY_LEFT_BUTTON_UP, &suppressLeftButtonUp)
+        == BELLWIN_TRAY_ACTION_DEFER_MENU
+    );
+    assert(
+        bellwin_tray_action(BELLWIN_TRAY_SELECT, &suppressLeftButtonUp)
+        == BELLWIN_TRAY_ACTION_NONE
+    );
+
+    assert(
+        bellwin_tray_action(BELLWIN_TRAY_LEFT_BUTTON_DOUBLE_CLICK, &suppressLeftButtonUp)
+        == BELLWIN_TRAY_ACTION_CANCEL_MENU_AND_SHOW_SETTINGS
+    );
+    assert(suppressLeftButtonUp);
+    assert(
+        bellwin_tray_action(BELLWIN_TRAY_LEFT_BUTTON_UP, &suppressLeftButtonUp)
+        == BELLWIN_TRAY_ACTION_NONE
+    );
+    assert(!suppressLeftButtonUp);
+    assert(
+        bellwin_tray_action(BELLWIN_TRAY_KEY_SELECT, &suppressLeftButtonUp)
+        == BELLWIN_TRAY_ACTION_SHOW_SETTINGS
+    );
+}
+
 static void test_pause_state(void) {
     assert(!bellwin_pause_is_active(1000, 0, 0));
     assert(bellwin_pause_is_active(1000, 2000, 0));
@@ -175,6 +202,7 @@ int main(void) {
     test_time_segment_editing();
     test_time_segment_stepping_wraps_only_selected_pair();
     test_time_segment_selection_cycles();
+    test_tray_click_actions();
     test_pause_state();
     test_persisted_timed_pause_validation();
     test_last_ring_relative_time_formatting();
