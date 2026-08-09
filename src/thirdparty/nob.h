@@ -866,6 +866,10 @@ NOBDEF char *nob_temp_running_executable_path(void);
 #  endif
 #endif
 
+#ifndef NOB_REBUILD_URSELF_BACKUP_PATH
+#define NOB_REBUILD_URSELF_BACKUP_PATH(binary_path) nob_temp_sprintf("%s.old", binary_path)
+#endif
+
 // Go Rebuild Urself™ Technology
 //
 //   How to use it:
@@ -1110,7 +1114,7 @@ NOBDEF void nob__go_rebuild_urself(int argc, char **argv, const char *source_pat
 
     Nob_Cmd cmd = {0};
 
-    const char *old_binary_path = nob_temp_sprintf("%s.old", binary_path);
+    const char *old_binary_path = NOB_REBUILD_URSELF_BACKUP_PATH(binary_path);
 
     if (!nob_rename(binary_path, old_binary_path)) exit(1);
     nob_cmd_append(&cmd, NOB_REBUILD_URSELF(binary_path, source_path));

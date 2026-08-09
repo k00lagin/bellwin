@@ -45,15 +45,19 @@ The output is `Bellwin.exe`, a 32-bit Windows GUI executable targeting Windows
 the executable. Theme support uses only Windows system APIs and does not add a
 runtime or sidecar DLL, so the distributed application remains one executable.
 
+Application sources and build resources live in `src/`, with tests under
+`src/tests/` and vendored single-header libraries under `src/thirdparty/`.
+Images and the embedded bell sound live in `resources/`.
+
 The settings window layout is computed with the vendored
 [Clay](https://github.com/nicbarker/clay) single-header library
-(`thirdparty/clay.h`, pinned at v0.14) and rendered through a small GDI
+(`src/thirdparty/clay.h`, pinned at v0.14) and rendered through a small GDI
 backend, so the executable still has no runtime dependencies. The semantic
-widget vocabulary and shared formatting rules live in `widgets.h`; the widget
-table, focus model, hit testing, and input dispatch live in `ui.c`; the
-declarative screen layout and single Clay implementation live in `layout.c`,
+widget vocabulary and shared formatting rules live in `src/widgets.h`; the widget
+table, focus model, hit testing, and input dispatch live in `src/ui.c`; the
+declarative screen layout and single Clay implementation live in `src/layout.c`,
 GDI rendering lives in
-`render_gdi.c`, and the native accessibility provider lives in `uia.c`.
+`src/render_gdi.c`, and the native accessibility provider lives in `src/uia.c`.
 These seams are covered by headless tests.
 
 Run the scheduling, widget, layout, command-line parsing, IPC-message
@@ -104,7 +108,7 @@ Commands use a versioned, fixed-size `WM_COPYDATA` protocol between the CLI
 process and the single GUI instance. Argument parsing uses the vendored
 [flag.h](https://github.com/tsoding/flag.h) single-header library pinned to
 commit `7d3699298551080678d7763adcdd22e78873f4c4`; its MIT license is stored in
-`thirdparty/flag.LICENSE`. No sidecar DLL or helper executable is required.
+`src/thirdparty/flag.LICENSE`. No sidecar DLL or helper executable is required.
 
 ## Windows themes
 

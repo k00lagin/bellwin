@@ -1,8 +1,9 @@
+#define BUILD_FOLDER ".build/"
+#define NOB_REBUILD_URSELF_BACKUP_PATH(binary_path) BUILD_FOLDER "nob.exe.old"
 #define NOB_IMPLEMENTATION
 #define NOB_UNSTRIP_PREFIX
 #include "./thirdparty/nob.h"
 
-#define BUILD_FOLDER ".build/"
 #define TARGET "i686-pc-windows-msvc"
 
 static Nob_Cmd cmd = {0};
@@ -16,12 +17,12 @@ static bool build_resources(void) {
     } resources[] = {
         {
             BUILD_FOLDER "version.res",
-            {"version.rc", "version.h"},
+            {"src/version.rc", "src/version.h"},
             2,
         },
         {
             BUILD_FOLDER "resources.res",
-            {"resources.rc", "resource.h", "BellSound.mp3", "resources/bellwin.ico"},
+            {"src/resources.rc", "src/resource.h", "resources/BellSound.mp3", "resources/bellwin.ico"},
             4,
         },
     };
@@ -43,7 +44,7 @@ static bool build_tests(void) {
         "clang", "-target", TARGET, "-fuse-ld=lld",
         "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601",
         "-Wall", "-Wextra", "-Werror",
-        "tests/core_tests.c",
+        "src/tests/core_tests.c",
         "-o", BUILD_FOLDER "core_tests.exe",
         "-Xlinker", "/SUBSYSTEM:CONSOLE,6.01", "-Xlinker", "/OSVERSION:6.1"
     );
@@ -56,7 +57,7 @@ static bool build_tests(void) {
         "clang", "-target", TARGET, "-fuse-ld=lld",
         "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601",
         "-Wall", "-Wextra", "-Werror",
-        "tests/widget_tests.c",
+        "src/tests/widget_tests.c",
         "-o", BUILD_FOLDER "widget_tests.exe",
         "-Xlinker", "/SUBSYSTEM:CONSOLE,6.01", "-Xlinker", "/OSVERSION:6.1"
     );
@@ -69,7 +70,7 @@ static bool build_tests(void) {
         "clang", "-target", TARGET, "-fuse-ld=lld",
         "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601",
         "-Wall", "-Wextra", "-Werror",
-        "tests/layout_tests.c", "layout.c",
+        "src/tests/layout_tests.c", "src/layout.c",
         "-o", BUILD_FOLDER "layout_tests.exe",
         "-Xlinker", "/SUBSYSTEM:CONSOLE,6.01", "-Xlinker", "/OSVERSION:6.1"
     );
@@ -82,7 +83,7 @@ static bool build_tests(void) {
         "clang", "-target", TARGET, "-fuse-ld=lld",
         "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601",
         "-Wall", "-Wextra", "-Werror",
-        "tests/cli_tests.c", "cli.c",
+        "src/tests/cli_tests.c", "src/cli.c",
         "-o", BUILD_FOLDER "cli_tests.exe",
         "-Xlinker", "/SUBSYSTEM:CONSOLE,6.01", "-Xlinker", "/OSVERSION:6.1"
     );
@@ -95,7 +96,7 @@ static bool build_tests(void) {
         "clang", "-target", TARGET, "-fuse-ld=lld",
         "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601", "-DBELLWIN_THEME_TESTING",
         "-Wall", "-Wextra", "-Werror",
-        "tests/theme_tests.c", "theme.c",
+        "src/tests/theme_tests.c", "src/theme.c",
         "-o", BUILD_FOLDER "theme_tests.exe",
         "-Xlinker", "/SUBSYSTEM:CONSOLE,6.01", "-Xlinker", "/OSVERSION:6.1",
         "-luser32", "-ladvapi32", "-ldwmapi"
@@ -106,9 +107,10 @@ static bool build_tests(void) {
 }
 
 int main(int argc, char **argv) {
+    if (!nob_mkdir_if_not_exists(BUILD_FOLDER)) return 1;
     NOB_GO_REBUILD_URSELF_PLUS(
         argc, argv,
-        "thirdparty/nob.h"
+        "src/thirdparty/nob.h"
     );
 
     bool runTests = false;
@@ -130,7 +132,6 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    if (!nob_mkdir_if_not_exists(BUILD_FOLDER)) return 1;
     if (runTests) return build_tests() ? 0 : 1;
     if (!build_resources()) return 1;
 
@@ -139,7 +140,7 @@ int main(int argc, char **argv) {
         "clang", "-target", TARGET, "-fuse-ld=lld",
         "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601", "-DUNICODE", "-D_UNICODE",
         "-Os", "-Wall", "-Wextra", "-Werror",
-        "main.c", "ui.c", "layout.c", "render_gdi.c", "uia.c", "cli.c", "theme.c", BUILD_FOLDER "version.res", BUILD_FOLDER "resources.res",
+        "src/main.c", "src/ui.c", "src/layout.c", "src/render_gdi.c", "src/uia.c", "src/cli.c", "src/theme.c", BUILD_FOLDER "version.res", BUILD_FOLDER "resources.res",
         "-o", "Bellwin.exe",
         "-Xlinker", "/SUBSYSTEM:WINDOWS,6.01", "-Xlinker", "/OSVERSION:6.1",
         "-Xlinker", "/ENTRY:mainCRTStartup",
