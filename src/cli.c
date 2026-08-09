@@ -35,6 +35,10 @@ static int cli_copy_argument(
     return 1;
 }
 
+static int cli_action_is_ipc(BellwinCliAction action) {
+    return action >= BELLWIN_CLI_RING && action <= BELLWIN_CLI_STATUS;
+}
+
 BellwinCliParseResult bellwin_cli_parse(
     int argc,
     char **argv,
@@ -62,6 +66,14 @@ BellwinCliParseResult bellwin_cli_parse(
     char **set = flag_c_str(flags, "set", NULL, "set a setting (key=value)");
     char **get = flag_c_str(flags, "get", NULL, "read a setting by key");
     bool *status = flag_c_bool(flags, "status", false, "print all settings and runtime state");
+    bool *install = flag_c_bool(flags, "install", false, "install Bellwin for the current user");
+    bool *uninstall = flag_c_bool(flags, "uninstall", false, "uninstall Bellwin for the current user");
+    uint64_t *uninstallHelper = flag_c_uint64(
+        flags, "uninstall-helper", UINT64_MAX, "internal uninstall cleanup"
+    );
+    uint64_t *uninstallReady = flag_c_uint64(
+        flags, "uninstall-ready", UINT64_MAX, "internal uninstall readiness event"
+    );
     bool *help = flag_c_bool(flags, "help", false, "show this help");
 
     char **normalized = (char **)malloc((size_t)argc * sizeof(*normalized));
@@ -100,7 +112,10 @@ BellwinCliParseResult bellwin_cli_parse(
         + (*show ? 1 : 0)
         + (*set ? 1 : 0)
         + (*get ? 1 : 0)
-        + (*status ? 1 : 0);
+        + (*status ? 1 : 0)
+        + (*install ? 1 : 0)
+        + (*uninstall ? 1 : 0)
+        + (*uninstallHelper != UINT64_MAX ? 1 : 0);
     if (actionCount > 1 || (*background && actionCount != 0)) {
         flag_c_free(flags);
         cli_error(error, errorCount, "choose exactly one action");
@@ -109,6 +124,19 @@ BellwinCliParseResult bellwin_cli_parse(
     if (*pause != UINT64_MAX && *pause != 30 && *pause != 60 && *pause != 120) {
         flag_c_free(flags);
         cli_error(error, errorCount, "--pause must be 30, 60, or 120");
+        return BELLWIN_CLI_PARSE_ERROR;
+    }
+    if (*uninstallHelper != UINT64_MAX
+            && (*uninstallHelper == 0 || *uninstallHelper > UINT32_MAX)) {
+        flag_c_free(flags);
+        cli_error(error, errorCount, "invalid uninstall helper process id");
+        return BELLWIN_CLI_PARSE_ERROR;
+    }
+    if ((*uninstallHelper == UINT64_MAX) != (*uninstallReady == UINT64_MAX)
+            || (*uninstallReady != UINT64_MAX
+                && (*uninstallReady == 0 || *uninstallReady > UINT32_MAX))) {
+        flag_c_free(flags);
+        cli_error(error, errorCount, "invalid uninstall helper readiness handle");
         return BELLWIN_CLI_PARSE_ERROR;
     }
 
@@ -122,6 +150,13 @@ BellwinCliParseResult bellwin_cli_parse(
     else if (*set) command->action = BELLWIN_CLI_SET;
     else if (*get) command->action = BELLWIN_CLI_GET;
     else if (*status) command->action = BELLWIN_CLI_STATUS;
+    else if (*install) command->action = BELLWIN_CLI_INSTALL;
+    else if (*uninstall) command->action = BELLWIN_CLI_UNINSTALL;
+    else if (*uninstallHelper != UINT64_MAX) {
+        command->action = BELLWIN_CLI_UNINSTALL_HELPER;
+        command->helperParentHandle = (uint32_t)*uninstallHelper;
+        command->helperReadyHandle = (uint32_t)*uninstallReady;
+    }
 
     const char *argument = *set ? *set : *get;
     int copied = !argument || cli_copy_argument(
@@ -141,6 +176,8 @@ const char *bellwin_cli_help_text(void) {
         "  --set key=value            Change a setting\n"
         "  --get key                  Read a setting\n"
         "  --status                   Print all settings and runtime state\n"
+        "  --install                  Install Bellwin for the current user\n"
+        "  --uninstall                Uninstall Bellwin for the current user\n"
         "  --background               Start without showing Settings\n"
         "  --help                     Show this help\n";
 }
@@ -150,7 +187,9 @@ void bellwin_cli_print_help(FILE *stream) {
 }
 
 int bellwin_cli_make_request(const BellwinCliCommand *command, BellwinIpcRequest *request) {
-    if (!command || !request || command->action == BELLWIN_CLI_NONE) return 0;
+    if (!command || !request || !cli_action_is_ipc(command->action)) {
+        return 0;
+    }
     memset(request, 0, sizeof(*request));
     request->version = BELLWIN_IPC_PROTOCOL_VERSION;
     request->size = sizeof(*request);
@@ -165,8 +204,7 @@ int bellwin_ipc_request_valid(const BellwinIpcRequest *request, size_t byteCount
     if (!request || byteCount != sizeof(*request)
             || request->version != BELLWIN_IPC_PROTOCOL_VERSION
             || request->size != sizeof(*request)
-            || request->action < BELLWIN_CLI_RING
-            || request->action > BELLWIN_CLI_STATUS
+            || !cli_action_is_ipc(request->action)
             || !memchr(request->argument, '\0', sizeof(request->argument))) {
         return 0;
     }

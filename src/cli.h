@@ -14,12 +14,17 @@ typedef enum BellwinCliAction {
     BELLWIN_CLI_SET,
     BELLWIN_CLI_GET,
     BELLWIN_CLI_STATUS,
+    BELLWIN_CLI_INSTALL,
+    BELLWIN_CLI_UNINSTALL,
+    BELLWIN_CLI_UNINSTALL_HELPER,
 } BellwinCliAction;
 
 typedef struct BellwinCliCommand {
     BellwinCliAction action;
     int pauseMinutes;
     int background;
+    uint32_t helperParentHandle;
+    uint32_t helperReadyHandle;
     char argument[128];
 } BellwinCliCommand;
 

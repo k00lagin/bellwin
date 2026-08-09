@@ -20,6 +20,7 @@
 #include "uia.h"
 #include "resource.h"
 #include "theme.h"
+#include "uninstall_helper.h"
 #include "version.h"
 #include "widgets.h"
 #include "layout.h"
@@ -28,6 +29,9 @@
 #define WINDOW_TITLE L"Settings ∙ Bellwin"
 #define APP_MUTEX L"Local\\Bellwin.SingleInstance"
 #define CLI_WINDOW_CLASS L"Bellwin.Cli.Response.Window"
+#define UNINSTALL_REGISTRY_KEY L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Bellwin"
+#define UNINSTALL_REGISTRY_BACKUP_KEY L"Software\\Bellwin\\InstallRollback"
+#define START_MENU_SHORTCUT L"Bellwin.lnk"
 #define BELLWIN_COPYDATA_REQUEST ((ULONG_PTR)0x42575131u)
 #define BELLWIN_COPYDATA_RESPONSE ((ULONG_PTR)0x42575231u)
 #define TIMER_SCHEDULE 1
@@ -64,6 +68,9 @@ AppState g_app;
 static UINT g_taskbarCreated;
 
 static void update_tray_state(void);
+static HANDLE acquire_installation_lock(void);
+static void release_installation_lock(HANDLE lock);
+static int delete_file_if_present(const wchar_t *path);
 
 int app_px(int logical) {
     return MulDiv(logical, g_app.dpi, 96);
@@ -135,17 +142,45 @@ static void enable_dpi_awareness(void) {
     }
 }
 
-static int ensure_app_directory(void) {
+static int prepare_app_paths(int createDirectory) {
     wchar_t localAppData[MAX_PATH];
-    if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, localAppData))) {
+    PWSTR resolvedLocalAppData = NULL;
+    HRESULT folderResult = SHGetKnownFolderPath(
+        &FOLDERID_LocalAppData, createDirectory ? KF_FLAG_CREATE : 0, NULL, &resolvedLocalAppData
+    );
+    if (FAILED(folderResult) || !resolvedLocalAppData) return 0;
+    size_t localAppDataLength = wcslen(resolvedLocalAppData);
+    if (localAppDataLength >= sizeof(localAppData) / sizeof(localAppData[0])) {
+        CoTaskMemFree(resolvedLocalAppData);
         return 0;
     }
+    memcpy(localAppData, resolvedLocalAppData, (localAppDataLength + 1) * sizeof(wchar_t));
+    CoTaskMemFree(resolvedLocalAppData);
     if (swprintf_s(g_app.appDataDirectory, MAX_PATH, L"%ls\\Bellwin", localAppData) < 0) return 0;
-    if (!CreateDirectoryW(g_app.appDataDirectory, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return 0;
+    if (createDirectory
+            && !CreateDirectoryW(g_app.appDataDirectory, NULL)
+            && GetLastError() != ERROR_ALREADY_EXISTS) {
+        return 0;
+    }
     if (swprintf_s(g_app.settingsPath, MAX_PATH, L"%ls\\settings.ini", g_app.appDataDirectory) < 0) return 0;
     if (swprintf_s(g_app.soundPath, MAX_PATH, L"%ls\\BellSound.mp3", g_app.appDataDirectory) < 0) return 0;
     if (swprintf_s(g_app.installedExePath, MAX_PATH, L"%ls\\Bellwin.exe", g_app.appDataDirectory) < 0) return 0;
     return 1;
+}
+
+static int ensure_app_directory(void) {
+    return prepare_app_paths(1);
+}
+
+static int install_directory_is_safe(int allowMissing) {
+    DWORD attributes = GetFileAttributesW(g_app.appDataDirectory);
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        DWORD error = GetLastError();
+        return allowMissing
+            && (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND);
+    }
+    return (attributes & FILE_ATTRIBUTE_DIRECTORY)
+        && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 
 static void write_setting(const wchar_t *key, int value) {
@@ -519,11 +554,24 @@ static int file_exists(const wchar_t *path) {
 static int set_autostart(int enabled) {
     HKEY key;
     DWORD disposition;
-    if (RegCreateKeyExW(
+    LONG openResult;
+    if (enabled) {
+        openResult = RegCreateKeyExW(
             HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, NULL, 0,
-            KEY_SET_VALUE, NULL, &key, &disposition) != ERROR_SUCCESS) {
-        return 0;
+            KEY_SET_VALUE, NULL, &key, &disposition
+        );
+    } else {
+        disposition = 0;
+        openResult = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            0,
+            KEY_SET_VALUE,
+            &key
+        );
+        if (openResult == ERROR_FILE_NOT_FOUND) return 1;
     }
+    if (openResult != ERROR_SUCCESS) return 0;
     (void)disposition;
     LONG result;
     if (!enabled) {
@@ -533,7 +581,8 @@ static int set_autostart(int enabled) {
         wchar_t currentExe[MAX_PATH];
         const wchar_t *target = g_app.installedExePath;
         if (!file_exists(target)) {
-            if (!GetModuleFileNameW(NULL, currentExe, MAX_PATH)) {
+            DWORD currentLength = GetModuleFileNameW(NULL, currentExe, MAX_PATH);
+            if (currentLength == 0 || currentLength >= MAX_PATH) {
                 RegCloseKey(key);
                 return 0;
             }
@@ -596,16 +645,268 @@ static int known_folder_file_path(REFKNOWNFOLDERID folderId, const wchar_t *file
     return ok;
 }
 
+static int uninstall_entry_exists(void) {
+    HKEY key;
+    LONG result = RegOpenKeyExW(
+        HKEY_CURRENT_USER, UNINSTALL_REGISTRY_KEY, 0, KEY_QUERY_VALUE, &key
+    );
+    if (result == ERROR_SUCCESS) RegCloseKey(key);
+    return result == ERROR_SUCCESS;
+}
+
+typedef struct AutostartSnapshot {
+    int exists;
+    DWORD type;
+    DWORD size;
+    BYTE data[(MAX_PATH + 32) * sizeof(wchar_t)];
+} AutostartSnapshot;
+
+static int capture_autostart(AutostartSnapshot *snapshot) {
+    ZeroMemory(snapshot, sizeof(*snapshot));
+    HKEY key;
+    LONG result = RegOpenKeyExW(
+        HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+        0,
+        KEY_QUERY_VALUE,
+        &key
+    );
+    if (result == ERROR_FILE_NOT_FOUND) return 1;
+    if (result != ERROR_SUCCESS) return 0;
+    snapshot->size = sizeof(snapshot->data);
+    result = RegQueryValueExW(
+        key, APP_NAME, NULL, &snapshot->type, snapshot->data, &snapshot->size
+    );
+    RegCloseKey(key);
+    if (result == ERROR_FILE_NOT_FOUND) return 1;
+    if (result != ERROR_SUCCESS) return 0;
+    snapshot->exists = 1;
+    return 1;
+}
+
+static int restore_autostart(const AutostartSnapshot *snapshot) {
+    if (!snapshot->exists) return set_autostart(0);
+    HKEY key;
+    DWORD disposition;
+    if (RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            0,
+            NULL,
+            0,
+            KEY_SET_VALUE,
+            NULL,
+            &key,
+            &disposition
+        ) != ERROR_SUCCESS) {
+        return 0;
+    }
+    (void)disposition;
+    LONG result = RegSetValueExW(
+        key, APP_NAME, 0, snapshot->type, snapshot->data, snapshot->size
+    );
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS;
+}
+
+static int registry_set_string(HKEY key, const wchar_t *name, const wchar_t *value) {
+    return RegSetValueExW(
+        key,
+        name,
+        0,
+        REG_SZ,
+        (const BYTE *)value,
+        (DWORD)((wcslen(value) + 1) * sizeof(*value))
+    ) == ERROR_SUCCESS;
+}
+
+static int registry_set_dword(HKEY key, const wchar_t *name, DWORD value) {
+    return RegSetValueExW(
+        key, name, 0, REG_DWORD, (const BYTE *)&value, sizeof(value)
+    ) == ERROR_SUCCESS;
+}
+
+static int registry_delete_optional_value(HKEY key, const wchar_t *name) {
+    LONG result = RegDeleteValueW(key, name);
+    return result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND;
+}
+
+static int delete_registry_tree_if_present(const wchar_t *path) {
+    LONG result = RegDeleteTreeW(HKEY_CURRENT_USER, path);
+    return result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND;
+}
+
+static int backup_uninstall_entry(void) {
+    if (!delete_registry_tree_if_present(UNINSTALL_REGISTRY_BACKUP_KEY)) return 0;
+    HKEY source;
+    if (RegOpenKeyExW(
+            HKEY_CURRENT_USER, UNINSTALL_REGISTRY_KEY, 0, KEY_READ, &source
+        ) != ERROR_SUCCESS) {
+        return 0;
+    }
+    HKEY backup = NULL;
+    DWORD disposition;
+    LONG result = RegCreateKeyExW(
+        HKEY_CURRENT_USER,
+        UNINSTALL_REGISTRY_BACKUP_KEY,
+        0,
+        NULL,
+        0,
+        KEY_WRITE,
+        NULL,
+        &backup,
+        &disposition
+    );
+    (void)disposition;
+    if (result == ERROR_SUCCESS) result = RegCopyTreeW(source, NULL, backup);
+    if (result == ERROR_SUCCESS) RegFlushKey(backup);
+    if (backup) RegCloseKey(backup);
+    RegCloseKey(source);
+    if (result != ERROR_SUCCESS) {
+        delete_registry_tree_if_present(UNINSTALL_REGISTRY_BACKUP_KEY);
+        return 0;
+    }
+    return 1;
+}
+
+static int restore_uninstall_entry(void) {
+    HKEY backup;
+    if (RegOpenKeyExW(
+            HKEY_CURRENT_USER, UNINSTALL_REGISTRY_BACKUP_KEY, 0, KEY_READ, &backup
+        ) != ERROR_SUCCESS) {
+        return 0;
+    }
+    int ok = delete_registry_tree_if_present(UNINSTALL_REGISTRY_KEY);
+    HKEY destination = NULL;
+    DWORD disposition;
+    if (ok && RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            UNINSTALL_REGISTRY_KEY,
+            0,
+            NULL,
+            0,
+            KEY_WRITE,
+            NULL,
+            &destination,
+            &disposition
+        ) != ERROR_SUCCESS) {
+        ok = 0;
+    }
+    (void)disposition;
+    if (ok && RegCopyTreeW(backup, NULL, destination) != ERROR_SUCCESS) ok = 0;
+    if (destination) RegCloseKey(destination);
+    RegCloseKey(backup);
+    if (ok) delete_registry_tree_if_present(UNINSTALL_REGISTRY_BACKUP_KEY);
+    return ok;
+}
+
+static int register_uninstall_entry(void) {
+    int entryExisted = uninstall_entry_exists();
+    if (entryExisted && !backup_uninstall_entry()) return 0;
+    HKEY key;
+    DWORD disposition;
+    if (RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            UNINSTALL_REGISTRY_KEY,
+            0,
+            NULL,
+            0,
+            KEY_SET_VALUE,
+            NULL,
+            &key,
+            &disposition
+        ) != ERROR_SUCCESS) {
+        return 0;
+    }
+    (void)disposition;
+
+    wchar_t version[32];
+    wchar_t uninstallCommand[MAX_PATH + 32];
+    wchar_t displayIcon[MAX_PATH + 8];
+    wchar_t installDate[9];
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    int formatted = swprintf_s(
+        version, sizeof(version) / sizeof(version[0]), L"%u.%u.%u.%u",
+        VER_MAJOR, VER_MINOR, VER_PATCH, VER_BUILD
+    ) >= 0 && swprintf_s(
+        uninstallCommand,
+        sizeof(uninstallCommand) / sizeof(uninstallCommand[0]),
+        L"\"%ls\" -uninstall",
+        g_app.installedExePath
+    ) >= 0 && swprintf_s(
+        displayIcon,
+        sizeof(displayIcon) / sizeof(displayIcon[0]),
+        L"\"%ls\",0",
+        g_app.installedExePath
+    ) >= 0 && swprintf_s(
+        installDate,
+        sizeof(installDate) / sizeof(installDate[0]),
+        L"%04u%02u%02u",
+        now.wYear,
+        now.wMonth,
+        now.wDay
+    ) >= 0;
+
+    DWORD estimatedSize = 0;
+    WIN32_FILE_ATTRIBUTE_DATA attributes;
+    if (GetFileAttributesExW(g_app.installedExePath, GetFileExInfoStandard, &attributes)) {
+        ULARGE_INTEGER bytes;
+        bytes.HighPart = attributes.nFileSizeHigh;
+        bytes.LowPart = attributes.nFileSizeLow;
+        ULONGLONG kibibytes = (bytes.QuadPart + 1023ULL) / 1024ULL;
+        estimatedSize = kibibytes > MAXDWORD ? MAXDWORD : (DWORD)kibibytes;
+    }
+
+    RegDeleteValueW(key, L"DisplayName");
+    int ok = formatted
+        && registry_set_string(key, L"DisplayVersion", version)
+        && registry_set_string(key, L"Publisher", APP_NAME)
+        && registry_set_string(key, L"InstallLocation", g_app.appDataDirectory)
+        && registry_set_string(key, L"DisplayIcon", displayIcon)
+        && registry_set_string(key, L"UninstallString", uninstallCommand)
+        && registry_set_string(key, L"QuietUninstallString", uninstallCommand)
+        && registry_set_string(key, L"InstallDate", installDate)
+        && registry_set_dword(key, L"EstimatedSize", estimatedSize)
+        && registry_set_dword(key, L"NoModify", 1)
+        && registry_set_dword(key, L"NoRepair", 1)
+        && registry_delete_optional_value(key, L"Version")
+        && registry_delete_optional_value(key, L"VersionMajor")
+        && registry_delete_optional_value(key, L"VersionMinor")
+        && registry_delete_optional_value(key, L"WindowsInstaller")
+        && registry_delete_optional_value(key, L"SystemComponent")
+        && registry_delete_optional_value(key, L"NoRemove")
+        && registry_delete_optional_value(key, L"ModifyPath")
+        && registry_set_string(key, L"DisplayName", APP_NAME);
+    RegCloseKey(key);
+    if (!ok) {
+        if (entryExisted) {
+            restore_uninstall_entry();
+        } else {
+            RegDeleteKeyW(HKEY_CURRENT_USER, UNINSTALL_REGISTRY_KEY);
+        }
+    } else if (entryExisted) {
+        delete_registry_tree_if_present(UNINSTALL_REGISTRY_BACKUP_KEY);
+    }
+    return ok;
+}
+
+static int delete_uninstall_entry(void) {
+    LONG result = RegDeleteKeyW(HKEY_CURRENT_USER, UNINSTALL_REGISTRY_KEY);
+    int deleted = result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND;
+    return deleted && delete_registry_tree_if_present(UNINSTALL_REGISTRY_BACKUP_KEY);
+}
+
 static void refresh_install_state(void) {
     int oldShowInstall = g_app.showInstall;
     int oldUpdateAvailable = g_app.updateAvailable;
     int installed = file_exists(g_app.installedExePath);
     g_app.installedVersion = installed ? executable_version(g_app.installedExePath) : 0;
     wchar_t startMenuShortcut[MAX_PATH];
-    int shortcutsReady = known_folder_file_path(&FOLDERID_Programs, L"Bellwin.lnk", startMenuShortcut, MAX_PATH)
+    int shortcutsReady = known_folder_file_path(&FOLDERID_Programs, START_MENU_SHORTCUT, startMenuShortcut, MAX_PATH)
         && file_exists(startMenuShortcut);
     g_app.updateAvailable = installed && g_app.installedVersion < current_version();
-    g_app.showInstall = !installed || g_app.updateAvailable || !shortcutsReady;
+    g_app.showInstall = !installed || g_app.updateAvailable || !shortcutsReady || !uninstall_entry_exists();
     if (!g_app.showInstall) g_app.hoverInstall = 0;
     uia_notify_install_state(oldShowInstall, oldUpdateAvailable);
 }
@@ -615,8 +916,19 @@ int install_visible(void) {
 }
 
 static HRESULT create_shortcut(REFKNOWNFOLDERID folderId, const wchar_t *fileName, const wchar_t *target) {
-    wchar_t shortcutPath[MAX_PATH];
+    wchar_t shortcutPath[MAX_PATH] = {0};
     if (!known_folder_file_path(folderId, fileName, shortcutPath, MAX_PATH)) return E_FAIL;
+    wchar_t stagingPath[MAX_PATH];
+    if (swprintf_s(
+            stagingPath,
+            sizeof(stagingPath) / sizeof(stagingPath[0]),
+            L"%ls.installing-%lu",
+            shortcutPath,
+            GetCurrentProcessId()
+        ) < 0) {
+        return E_FAIL;
+    }
+    DeleteFileW(stagingPath);
 
     IShellLinkW *link = NULL;
     HRESULT result = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, (void **)&link);
@@ -629,30 +941,226 @@ static HRESULT create_shortcut(REFKNOWNFOLDERID folderId, const wchar_t *fileNam
 
     IPersistFile *persist = NULL;
     if (SUCCEEDED(result)) result = link->lpVtbl->QueryInterface(link, &IID_IPersistFile, (void **)&persist);
-    if (SUCCEEDED(result) && persist) result = persist->lpVtbl->Save(persist, shortcutPath, TRUE);
+    if (SUCCEEDED(result) && persist) result = persist->lpVtbl->Save(persist, stagingPath, TRUE);
     if (persist) persist->lpVtbl->Release(persist);
     link->lpVtbl->Release(link);
+    if (SUCCEEDED(result) && !MoveFileExW(
+            stagingPath,
+            shortcutPath,
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+        )) {
+        result = HRESULT_FROM_WIN32(GetLastError());
+    }
+    if (FAILED(result)) DeleteFileW(stagingPath);
     return result;
 }
 
-static int install_app(void) {
-    wchar_t source[MAX_PATH];
-    if (!GetModuleFileNameW(NULL, source, MAX_PATH)) return 0;
+typedef struct InstallFileChange {
+    int changed;
+    int replacedExisting;
+    wchar_t backupPath[MAX_PATH];
+} InstallFileChange;
+
+static int files_are_equal(const wchar_t *leftPath, const wchar_t *rightPath) {
+    HANDLE left = CreateFileW(
+        leftPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL
+    );
+    if (left == INVALID_HANDLE_VALUE) return 0;
+    HANDLE right = CreateFileW(
+        rightPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL
+    );
+    if (right == INVALID_HANDLE_VALUE) {
+        CloseHandle(left);
+        return 0;
+    }
+
+    BYTE leftBuffer[32 * 1024];
+    BYTE rightBuffer[32 * 1024];
+    int equal = 1;
+    for (;;) {
+        DWORD leftRead = 0;
+        DWORD rightRead = 0;
+        if (!ReadFile(left, leftBuffer, sizeof(leftBuffer), &leftRead, NULL)
+                || !ReadFile(right, rightBuffer, sizeof(rightBuffer), &rightRead, NULL)
+                || leftRead != rightRead
+                || (leftRead && memcmp(leftBuffer, rightBuffer, leftRead) != 0)) {
+            equal = 0;
+            break;
+        }
+        if (leftRead == 0) break;
+    }
+    CloseHandle(right);
+    CloseHandle(left);
+    return equal;
+}
+
+static int install_executable_atomically(
+    const wchar_t *source,
+    InstallFileChange *change
+) {
+    ZeroMemory(change, sizeof(*change));
+    if (_wcsicmp(source, g_app.installedExePath) == 0) return 1;
+
     uint64_t installedVersion = file_exists(g_app.installedExePath)
         ? executable_version(g_app.installedExePath)
         : 0;
-    int shouldCopy = _wcsicmp(source, g_app.installedExePath) != 0
-        && (!file_exists(g_app.installedExePath) || installedVersion < current_version());
-    if (shouldCopy) {
-        if (!CopyFileW(source, g_app.installedExePath, FALSE)) return 0;
+    if (file_exists(g_app.installedExePath) && installedVersion > current_version()) return 0;
+    if (installedVersion == current_version()
+            && files_are_equal(source, g_app.installedExePath)) {
+        return 1;
     }
 
-    HRESULT startMenu = create_shortcut(&FOLDERID_Programs, L"Bellwin.lnk", g_app.installedExePath);
-    if (FAILED(startMenu)) return 0;
+    wchar_t stagingPath[MAX_PATH];
+    if (!GetTempFileNameW(g_app.appDataDirectory, L"BLW", 0, stagingPath)) {
+        return 0;
+    }
+    if (!GetTempFileNameW(g_app.appDataDirectory, L"BLB", 0, change->backupPath)) {
+        DeleteFileW(stagingPath);
+        return 0;
+    }
+    DeleteFileW(change->backupPath);
+    if (!CopyFileW(source, stagingPath, FALSE)
+            || !SetFileAttributesW(stagingPath, FILE_ATTRIBUTE_NORMAL)) {
+        DeleteFileW(stagingPath);
+        return 0;
+    }
+    DWORD stagingAttributes = GetFileAttributesW(stagingPath);
+    if (stagingAttributes == INVALID_FILE_ATTRIBUTES
+            || (stagingAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
+            || executable_version(stagingPath) != current_version()) {
+        DeleteFileW(stagingPath);
+        return 0;
+    }
 
-    if (g_app.autoStart && !set_autostart(1)) return 0;
-    refresh_install_state();
-    InvalidateRect(g_app.window, NULL, FALSE);
+    change->replacedExisting = file_exists(g_app.installedExePath);
+    int moved;
+    if (change->replacedExisting) {
+        moved = ReplaceFileW(
+            g_app.installedExePath,
+            stagingPath,
+            change->backupPath,
+            0,
+            NULL,
+            NULL
+        );
+    } else {
+        moved = MoveFileExW(stagingPath, g_app.installedExePath, MOVEFILE_WRITE_THROUGH);
+    }
+    if (!moved) {
+        if (file_exists(change->backupPath) && !file_exists(g_app.installedExePath)) {
+            MoveFileExW(
+                change->backupPath,
+                g_app.installedExePath,
+                MOVEFILE_WRITE_THROUGH
+            );
+        }
+        DeleteFileW(stagingPath);
+        return 0;
+    }
+    change->changed = 1;
+    return 1;
+}
+
+static void finish_install_file_change(InstallFileChange *change, int commit) {
+    if (!change->changed) return;
+    if (commit) {
+        if (change->replacedExisting) DeleteFileW(change->backupPath);
+        return;
+    }
+    if (change->replacedExisting) {
+        MoveFileExW(
+            change->backupPath,
+            g_app.installedExePath,
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+        );
+    } else {
+        DeleteFileW(g_app.installedExePath);
+    }
+}
+
+typedef struct ShortcutChange {
+    int existed;
+    wchar_t shortcutPath[MAX_PATH];
+    wchar_t backupPath[MAX_PATH];
+} ShortcutChange;
+
+static int prepare_shortcut_change(ShortcutChange *change) {
+    ZeroMemory(change, sizeof(*change));
+    if (!known_folder_file_path(
+            &FOLDERID_Programs,
+            START_MENU_SHORTCUT,
+            change->shortcutPath,
+            sizeof(change->shortcutPath) / sizeof(change->shortcutPath[0])
+        )) {
+        return 0;
+    }
+    change->existed = file_exists(change->shortcutPath);
+    if (!change->existed) return 1;
+    if (!GetTempFileNameW(g_app.appDataDirectory, L"BLS", 0, change->backupPath)) return 0;
+    if (!CopyFileW(change->shortcutPath, change->backupPath, FALSE)) {
+        DeleteFileW(change->backupPath);
+        return 0;
+    }
+    return 1;
+}
+
+static void finish_shortcut_change(ShortcutChange *change, int commit) {
+    if (commit) {
+        if (change->existed) DeleteFileW(change->backupPath);
+        return;
+    }
+    if (change->existed) {
+        MoveFileExW(
+            change->backupPath,
+            change->shortcutPath,
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+        );
+    } else {
+        delete_file_if_present(change->shortcutPath);
+    }
+}
+
+static int install_app(void) {
+    if (!install_directory_is_safe(0)) return 0;
+    wchar_t source[MAX_PATH];
+    DWORD sourceLength = GetModuleFileNameW(NULL, source, MAX_PATH);
+    if (sourceLength == 0 || sourceLength >= MAX_PATH) return 0;
+    AutostartSnapshot autostartSnapshot;
+    if (!capture_autostart(&autostartSnapshot)) return 0;
+    InstallFileChange fileChange;
+    if (!install_executable_atomically(source, &fileChange)) return 0;
+
+    ShortcutChange shortcutChange;
+    if (!prepare_shortcut_change(&shortcutChange)) {
+        restore_autostart(&autostartSnapshot);
+        finish_install_file_change(&fileChange, 0);
+        return 0;
+    }
+    HRESULT startMenu = create_shortcut(&FOLDERID_Programs, START_MENU_SHORTCUT, g_app.installedExePath);
+    if (FAILED(startMenu)) {
+        restore_autostart(&autostartSnapshot);
+        finish_shortcut_change(&shortcutChange, 0);
+        finish_install_file_change(&fileChange, 0);
+        return 0;
+    }
+
+    if (g_app.autoStart && !set_autostart(1)) {
+        restore_autostart(&autostartSnapshot);
+        finish_shortcut_change(&shortcutChange, 0);
+        finish_install_file_change(&fileChange, 0);
+        return 0;
+    }
+
+    if (!register_uninstall_entry()) {
+        restore_autostart(&autostartSnapshot);
+        finish_shortcut_change(&shortcutChange, 0);
+        finish_install_file_change(&fileChange, 0);
+        return 0;
+    }
+    finish_shortcut_change(&shortcutChange, 1);
+    finish_install_file_change(&fileChange, 1);
     return 1;
 }
 
@@ -676,7 +1184,12 @@ void activate_autostart(void) {
 
 void activate_install(void) {
     if (!g_app.showInstall) return;
-    if (install_app()) {
+    HANDLE lock = acquire_installation_lock();
+    int installed = lock && install_app();
+    release_installation_lock(lock);
+    if (installed) {
+        refresh_install_state();
+        InvalidateRect(g_app.window, NULL, FALSE);
         MessageBoxW(g_app.window, L"Bellwin was installed. A shortcut was added to the Start menu.", APP_NAME, MB_OK | MB_ICONINFORMATION);
     } else {
         MessageBoxW(g_app.window, L"Bellwin could not be installed.", APP_NAME, MB_OK | MB_ICONERROR);
@@ -1085,6 +1598,9 @@ static LRESULT handle_ipc_request(WPARAM wParam, LPARAM lParam) {
         if (!ok) snprintf(response.text, sizeof(response.text), "could not format status\n");
         break;
     case BELLWIN_CLI_NONE:
+    case BELLWIN_CLI_INSTALL:
+    case BELLWIN_CLI_UNINSTALL:
+    case BELLWIN_CLI_UNINSTALL_HELPER:
         ok = 0;
         snprintf(response.text, sizeof(response.text), "missing action\n");
         break;
@@ -1524,11 +2040,8 @@ static void cli_write(DWORD streamId, const char *text) {
     }
 }
 
-static int start_background_server(void) {
-    wchar_t executable[MAX_PATH];
+static int start_background_executable(const wchar_t *executable) {
     wchar_t commandLine[MAX_PATH + 32];
-    DWORD length = GetModuleFileNameW(NULL, executable, MAX_PATH);
-    if (length == 0 || length >= MAX_PATH) return 0;
     int commandLength = swprintf_s(
         commandLine,
         sizeof(commandLine) / sizeof(commandLine[0]),
@@ -1546,6 +2059,13 @@ static int start_background_server(void) {
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     return 1;
+}
+
+static int start_background_server(void) {
+    wchar_t executable[MAX_PATH];
+    DWORD length = GetModuleFileNameW(NULL, executable, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return 0;
+    return start_background_executable(executable);
 }
 
 static HWND find_or_start_server(void) {
@@ -1653,7 +2173,8 @@ static int run_cli_command(const BellwinCliCommand *command) {
 
 static int current_copy_is_newer_than_installed(void) {
     wchar_t currentExe[MAX_PATH];
-    if (!GetModuleFileNameW(NULL, currentExe, MAX_PATH)) return 0;
+    DWORD currentLength = GetModuleFileNameW(NULL, currentExe, MAX_PATH);
+    if (currentLength == 0 || currentLength >= MAX_PATH) return 0;
     if (_wcsicmp(currentExe, g_app.installedExePath) == 0) return 0;
     if (!file_exists(g_app.installedExePath)) return 0;
     return current_version() > executable_version(g_app.installedExePath);
@@ -1684,6 +2205,357 @@ static int take_over_from_older_instance(void) {
     return 0;
 }
 
+static HANDLE acquire_installation_lock(void) {
+    wchar_t lockPath[MAX_PATH];
+    if (swprintf_s(
+            lockPath,
+            sizeof(lockPath) / sizeof(lockPath[0]),
+            L"%ls.install.lock",
+            g_app.appDataDirectory
+        ) < 0) {
+        return NULL;
+    }
+    for (int attempt = 0; attempt < 600; ++attempt) {
+        HANDLE lock = CreateFileW(
+            lockPath,
+            GENERIC_READ | GENERIC_WRITE | DELETE,
+            0,
+            NULL,
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE,
+            NULL
+        );
+        if (lock != INVALID_HANDLE_VALUE) return lock;
+        DWORD error = GetLastError();
+        if (error != ERROR_SHARING_VIOLATION && error != ERROR_LOCK_VIOLATION) return NULL;
+        Sleep(50);
+    }
+    return NULL;
+}
+
+static void release_installation_lock(HANDLE lock) {
+    if (!lock) return;
+    CloseHandle(lock);
+}
+
+static int stop_running_instance_for_maintenance(void) {
+    HWND window = FindWindowW(APP_CLASS, NULL);
+    if (!window) return 1;
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(window, &processId);
+    if (!processId || processId == GetCurrentProcessId()) return 0;
+    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, processId);
+    if (!process) return 0;
+    int requested = PostMessageW(window, WM_COMMAND, CMD_TRAY_EXIT, 0);
+    DWORD wait = requested ? WaitForSingleObject(process, 10000) : WAIT_FAILED;
+    CloseHandle(process);
+    return wait == WAIT_OBJECT_0;
+}
+
+static int delete_file_if_present(const wchar_t *path) {
+    if (DeleteFileW(path)) return 1;
+    DWORD error = GetLastError();
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return 1;
+    if (error == ERROR_ACCESS_DENIED) {
+        DWORD attributes = GetFileAttributesW(path);
+        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY)) {
+            if (SetFileAttributesW(path, attributes & ~FILE_ATTRIBUTE_READONLY) && DeleteFileW(path)) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int remove_install_directory_if_empty(void) {
+    if (RemoveDirectoryW(g_app.appDataDirectory)) return 1;
+    DWORD error = GetLastError();
+    return error == ERROR_PATH_NOT_FOUND
+        || error == ERROR_FILE_NOT_FOUND
+        || error == ERROR_DIR_NOT_EMPTY;
+}
+
+static int remove_start_menu_shortcut(void) {
+    wchar_t shortcutPath[MAX_PATH];
+    return known_folder_file_path(
+        &FOLDERID_Programs, START_MENU_SHORTCUT, shortcutPath, MAX_PATH
+    ) && delete_file_if_present(shortcutPath);
+}
+
+static int remove_uninstall_artifacts(int deleteExecutable, int deleteRegistryEntry) {
+    if (!install_directory_is_safe(1)) return 0;
+    int ok = set_autostart(0);
+    if (!remove_start_menu_shortcut()) ok = 0;
+    if (!delete_file_if_present(g_app.soundPath)) ok = 0;
+    if (deleteExecutable && !delete_file_if_present(g_app.installedExePath)) ok = 0;
+    if (!ok) return 0;
+    if (!remove_install_directory_if_empty()) return 0;
+    if (deleteRegistryEntry && !delete_uninstall_entry()) return 0;
+    return 1;
+}
+
+typedef struct UninstallHelperProcess {
+    PROCESS_INFORMATION process;
+    HANDLE readyEvent;
+    wchar_t path[MAX_PATH];
+} UninstallHelperProcess;
+
+static int create_suspended_uninstall_helper(
+    HANDLE lifecycleLock,
+    UninstallHelperProcess *helper
+) {
+    ZeroMemory(helper, sizeof(*helper));
+    wchar_t currentExecutable[MAX_PATH];
+    DWORD currentLength = GetModuleFileNameW(NULL, currentExecutable, MAX_PATH);
+    if (currentLength == 0 || currentLength >= MAX_PATH) return 0;
+
+    if (!bellwin_create_temporary_executable_copy(
+            currentExecutable,
+            helper->path,
+            sizeof(helper->path) / sizeof(helper->path[0])
+        )) {
+        return 0;
+    }
+    DWORD temporaryAttributes = GetFileAttributesW(helper->path);
+    if (temporaryAttributes == INVALID_FILE_ATTRIBUTES
+            || (temporaryAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
+            || executable_version(helper->path) != current_version()) {
+        DeleteFileW(helper->path);
+        helper->path[0] = L'\0';
+        return 0;
+    }
+
+    HANDLE parentHandle = NULL;
+    if (!DuplicateHandle(
+            GetCurrentProcess(),
+            GetCurrentProcess(),
+            GetCurrentProcess(),
+            &parentHandle,
+            SYNCHRONIZE,
+            TRUE,
+            0
+        )) {
+        DeleteFileW(helper->path);
+        return 0;
+    }
+    if (!SetHandleInformation(lifecycleLock, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
+        CloseHandle(parentHandle);
+        DeleteFileW(helper->path);
+        return 0;
+    }
+    HANDLE readyEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!readyEvent || !SetHandleInformation(readyEvent, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
+        if (readyEvent) CloseHandle(readyEvent);
+        SetHandleInformation(lifecycleLock, HANDLE_FLAG_INHERIT, 0);
+        CloseHandle(parentHandle);
+        DeleteFileW(helper->path);
+        return 0;
+    }
+
+    wchar_t commandLine[MAX_PATH + 96];
+    int commandLength = swprintf_s(
+        commandLine,
+        sizeof(commandLine) / sizeof(commandLine[0]),
+        L"\"%ls\" --uninstall-helper %lu --uninstall-ready %lu",
+        helper->path,
+        (DWORD)(uintptr_t)parentHandle,
+        (DWORD)(uintptr_t)readyEvent
+    );
+    STARTUPINFOW startup;
+    ZeroMemory(&startup, sizeof(startup));
+    startup.cb = sizeof(startup);
+    int created = commandLength >= 0 && CreateProcessW(
+        helper->path,
+        commandLine,
+        NULL,
+        NULL,
+        TRUE,
+        CREATE_SUSPENDED | CREATE_NO_WINDOW,
+        NULL,
+        NULL,
+        &startup,
+        &helper->process
+    );
+    SetHandleInformation(lifecycleLock, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(readyEvent, HANDLE_FLAG_INHERIT, 0);
+    CloseHandle(parentHandle);
+    if (!created) {
+        CloseHandle(readyEvent);
+        DeleteFileW(helper->path);
+        helper->path[0] = L'\0';
+        return 0;
+    }
+    helper->readyEvent = readyEvent;
+    return created;
+}
+
+static void cancel_uninstall_helper(UninstallHelperProcess *helper) {
+    TerminateProcess(helper->process.hProcess, 1);
+    WaitForSingleObject(helper->process.hProcess, 5000);
+    CloseHandle(helper->readyEvent);
+    CloseHandle(helper->process.hThread);
+    CloseHandle(helper->process.hProcess);
+    DeleteFileW(helper->path);
+    ZeroMemory(helper, sizeof(*helper));
+}
+
+static int prepare_uninstall_helper(UninstallHelperProcess *helper) {
+    if (!bellwin_start_temporary_file_cleanup(helper->path)) {
+        cancel_uninstall_helper(helper);
+        return 0;
+    }
+    if (ResumeThread(helper->process.hThread) == (DWORD)-1
+            || WaitForSingleObject(helper->readyEvent, 10000) != WAIT_OBJECT_0) {
+        cancel_uninstall_helper(helper);
+        return 0;
+    }
+    return 1;
+}
+
+static void detach_uninstall_helper(UninstallHelperProcess *helper) {
+    CloseHandle(helper->readyEvent);
+    CloseHandle(helper->process.hThread);
+    CloseHandle(helper->process.hProcess);
+    ZeroMemory(helper, sizeof(*helper));
+}
+
+static int run_uninstall_helper(uint32_t parentHandleValue, uint32_t readyHandleValue) {
+    HANDLE parent = (HANDLE)(uintptr_t)parentHandleValue;
+    HANDLE readyEvent = (HANDLE)(uintptr_t)readyHandleValue;
+    if (!prepare_app_paths(0)) {
+        CloseHandle(readyEvent);
+        CloseHandle(parent);
+        return 1;
+    }
+    if (!install_directory_is_safe(1)) {
+        cli_write(STD_ERROR_HANDLE, "bellwin: unsafe installation directory\n");
+        return 1;
+    }
+    DWORD installDirectoryAttributes = GetFileAttributesW(g_app.appDataDirectory);
+    DWORD executableAttributes = GetFileAttributesW(g_app.installedExePath);
+    if (installDirectoryAttributes == INVALID_FILE_ATTRIBUTES
+            || !(installDirectoryAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            || (installDirectoryAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+            || executableAttributes == INVALID_FILE_ATTRIBUTES
+            || (executableAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) {
+        CloseHandle(readyEvent);
+        CloseHandle(parent);
+        return 1;
+    }
+    if (!SetEvent(readyEvent)) {
+        CloseHandle(readyEvent);
+        CloseHandle(parent);
+        return 1;
+    }
+    CloseHandle(readyEvent);
+    DWORD wait = WaitForSingleObject(parent, 60000);
+    CloseHandle(parent);
+    if (wait != WAIT_OBJECT_0) return 1;
+
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        if (!install_directory_is_safe(0)) return 1;
+        if (delete_file_if_present(g_app.installedExePath)) {
+            if (!remove_install_directory_if_empty()) return 1;
+            if (!delete_uninstall_entry()) return 1;
+            return 0;
+        }
+        Sleep(50);
+    }
+    return 1;
+}
+
+static int install_requires_running_instance_shutdown(void) {
+    wchar_t source[MAX_PATH];
+    DWORD sourceLength = GetModuleFileNameW(NULL, source, MAX_PATH);
+    if (sourceLength == 0 || sourceLength >= MAX_PATH) return 1;
+    if (_wcsicmp(source, g_app.installedExePath) == 0) return 0;
+    if (!file_exists(g_app.installedExePath)) return 0;
+    uint64_t installedVersion = executable_version(g_app.installedExePath);
+    return installedVersion < current_version()
+        || (installedVersion == current_version()
+            && !files_are_equal(source, g_app.installedExePath));
+}
+
+static int run_install_command(void) {
+    if (!ensure_app_directory()) {
+        cli_write(STD_ERROR_HANDLE, "bellwin: could not resolve the installation paths\n");
+        return 1;
+    }
+    HANDLE lock = acquire_installation_lock();
+    if (!lock) {
+        cli_write(STD_ERROR_HANDLE, "bellwin: installation is already in progress\n");
+        return 1;
+    }
+    int ok = 1;
+    int stoppedRunningInstance = 0;
+    if (ok && install_requires_running_instance_shutdown()
+            && FindWindowW(APP_CLASS, NULL)) {
+        stoppedRunningInstance = 1;
+        ok = stop_running_instance_for_maintenance();
+    }
+    HRESULT com = E_FAIL;
+    if (ok) {
+        com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+        ok = SUCCEEDED(com);
+    }
+    if (ok) {
+        g_app.autoStart = is_autostart_enabled();
+        ok = install_app();
+    }
+    if (SUCCEEDED(com)) CoUninitialize();
+    if (stoppedRunningInstance && file_exists(g_app.installedExePath)
+            && !start_background_executable(g_app.installedExePath)) {
+        cli_write(STD_ERROR_HANDLE, "bellwin: warning: could not restart the background instance\n");
+    }
+    release_installation_lock(lock);
+    if (!ok) {
+        cli_write(STD_ERROR_HANDLE, "bellwin: installation failed\n");
+        return 1;
+    }
+    cli_write(STD_OUTPUT_HANDLE, "install=ok\n");
+    return 0;
+}
+
+static int run_uninstall_command(void) {
+    if (!prepare_app_paths(0)) {
+        cli_write(STD_ERROR_HANDLE, "bellwin: could not resolve the installation paths\n");
+        return 1;
+    }
+    if (!install_directory_is_safe(1)) {
+        cli_write(STD_ERROR_HANDLE, "bellwin: unsafe installation directory\n");
+        return 1;
+    }
+    HANDLE lock = acquire_installation_lock();
+    if (!lock) {
+        cli_write(STD_ERROR_HANDLE, "bellwin: installation is already in progress\n");
+        return 1;
+    }
+    int ok = stop_running_instance_for_maintenance();
+    wchar_t currentExecutable[MAX_PATH];
+    DWORD currentLength = GetModuleFileNameW(NULL, currentExecutable, MAX_PATH);
+    if (currentLength == 0 || currentLength >= MAX_PATH) ok = 0;
+    int runningInstalledCopy = ok
+        && _wcsicmp(currentExecutable, g_app.installedExePath) == 0;
+
+    UninstallHelperProcess helper;
+    ZeroMemory(&helper, sizeof(helper));
+    if (runningInstalledCopy && !create_suspended_uninstall_helper(lock, &helper)) ok = 0;
+    if (runningInstalledCopy && ok && !prepare_uninstall_helper(&helper)) ok = 0;
+    if (ok) ok = remove_uninstall_artifacts(!runningInstalledCopy, !runningInstalledCopy);
+    if (runningInstalledCopy) {
+        if (ok) detach_uninstall_helper(&helper);
+        else if (helper.process.hProcess) cancel_uninstall_helper(&helper);
+    }
+    release_installation_lock(lock);
+    if (!ok) {
+        cli_write(STD_ERROR_HANDLE, "bellwin: uninstallation incomplete; run -uninstall again\n");
+        return 1;
+    }
+    cli_write(STD_OUTPUT_HANDLE, "uninstall=ok\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     ZeroMemory(&g_app, sizeof(g_app));
     g_app.instance = GetModuleHandleW(NULL);
@@ -1699,6 +2571,13 @@ int main(int argc, char **argv) {
     if (parseResult == BELLWIN_CLI_PARSE_HELP) {
         cli_write(STD_OUTPUT_HANDLE, bellwin_cli_help_text());
         return 0;
+    }
+    if (command.action == BELLWIN_CLI_INSTALL) return run_install_command();
+    if (command.action == BELLWIN_CLI_UNINSTALL) return run_uninstall_command();
+    if (command.action == BELLWIN_CLI_UNINSTALL_HELPER) {
+        return run_uninstall_helper(
+            command.helperParentHandle, command.helperReadyHandle
+        );
     }
     if (command.action != BELLWIN_CLI_NONE) return run_cli_command(&command);
     int background = command.background;

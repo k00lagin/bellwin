@@ -96,6 +96,8 @@ Bellwin.exe --show
 Bellwin.exe --get volume
 Bellwin.exe --set volume=40
 Bellwin.exe --status
+Bellwin.exe -install
+Bellwin.exe -uninstall
 ```
 
 Supported setting keys are `volume`, `minimum-interval`, `maximum-interval`,
@@ -131,3 +133,16 @@ The **Install** button copies the executable to
 If the installed file has a different version, the button is shown as
 **Update**. **Launch at login** adds or removes the per-user startup entry;
 startup launches Bellwin in the tray without opening the settings window.
+
+`-install` performs the same per-user installation without elevation. It also
+registers Bellwin in Installed Apps under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Bellwin`.
+Installation is idempotent: running it again repairs the executable, shortcut,
+autostart target, and uninstall metadata.
+
+`-uninstall` cleanly stops a running Bellwin instance and removes the installed
+executable, extracted sound, Start menu shortcut, autostart value, and Installed
+Apps entry. User settings in `%LOCALAPPDATA%\Bellwin\settings.ini` are preserved.
+Both the single-dash forms above and conventional `--install` / `--uninstall`
+are accepted. Successful commands print `install=ok` or `uninstall=ok` and exit
+with status `0`; an incomplete operation returns a nonzero status.

@@ -12,7 +12,7 @@ static Nob_Procs procs = {0};
 static bool build_resources(void) {
     struct ResourceBuild {
         const char *output;
-        const char *inputs[4];
+        const char *inputs[5];
         size_t inputCount;
     } resources[] = {
         {
@@ -22,8 +22,8 @@ static bool build_resources(void) {
         },
         {
             BUILD_FOLDER "resources.res",
-            {"src/resources.rc", "src/resource.h", "resources/BellSound.mp3", "resources/bellwin.ico"},
-            4,
+            {"src/resources.rc", "src/resource.h", "src/app.manifest", "resources/BellSound.mp3", "resources/bellwin.ico"},
+            5,
         },
     };
 
@@ -39,6 +39,19 @@ static bool build_resources(void) {
 }
 
 static bool build_tests(void) {
+    nob_cmd_append(
+        &cmd,
+        "clang", "-target", TARGET, "-fuse-ld=lld",
+        "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601", "-DUNICODE", "-D_UNICODE",
+        "-Wall", "-Wextra", "-Werror",
+        "src/tests/uninstall_helper_tests.c", "src/uninstall_helper.c",
+        "-o", BUILD_FOLDER "helper_cleanup_tests.exe",
+        "-Xlinker", "/SUBSYSTEM:CONSOLE,6.01", "-Xlinker", "/OSVERSION:6.1"
+    );
+    if (!nob_cmd_run(&cmd)) return false;
+    nob_cmd_append(&cmd, BUILD_FOLDER "helper_cleanup_tests.exe");
+    if (!nob_cmd_run(&cmd)) return false;
+
     nob_cmd_append(
         &cmd,
         "clang", "-target", TARGET, "-fuse-ld=lld",
@@ -140,7 +153,7 @@ int main(int argc, char **argv) {
         "clang", "-target", TARGET, "-fuse-ld=lld",
         "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601", "-DUNICODE", "-D_UNICODE",
         "-Os", "-Wall", "-Wextra", "-Werror",
-        "src/main.c", "src/ui.c", "src/layout.c", "src/render_gdi.c", "src/uia.c", "src/cli.c", "src/theme.c", BUILD_FOLDER "version.res", BUILD_FOLDER "resources.res",
+        "src/main.c", "src/ui.c", "src/layout.c", "src/render_gdi.c", "src/uia.c", "src/cli.c", "src/theme.c", "src/uninstall_helper.c", BUILD_FOLDER "version.res", BUILD_FOLDER "resources.res",
         "-o", "Bellwin.exe",
         "-Xlinker", "/SUBSYSTEM:WINDOWS,6.01", "-Xlinker", "/OSVERSION:6.1",
         "-Xlinker", "/ENTRY:mainCRTStartup",
