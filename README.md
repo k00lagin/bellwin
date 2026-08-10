@@ -4,6 +4,12 @@ Bellwin rings a bell at an unpredictable time between the configured minimum
 and maximum intervals. Quiet hours suppress the sound, while the tray icon
 keeps the program available after the settings window is closed.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="resources/screenshot-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="resources/screenshot-light.png">
+  <img alt="Bellwin settings window" src="resources/screenshot-light.png">
+</picture>
+
 All settings controls support keyboard focus with `Tab` and `Shift+Tab`.
 Focused sliders use the left/right arrows, the switch and install button use
 `Space` or `Enter`, and the selected hour/minute pair can be typed directly or
